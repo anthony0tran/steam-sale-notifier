@@ -1,6 +1,6 @@
 import { sendDiscordNotifications } from "./discord";
 import { fetchSteamFreeGames, isTemporarilyFree } from "./steam";
-import { getSeenGames, pruneSeenGames, saveSeenGames } from "./state";
+import { getSeenGames, isNotificationDue, pruneSeenGames, saveSeenGames } from "./state";
 import type { Env, SeenGames, SteamGame } from "./types";
 import { errorMessage } from "./utils";
 
@@ -86,7 +86,8 @@ async function mapWithConcurrency<T>(
  * One scheduled check:
  *   1. Fetch current temporary free games from Steam.
  *   2. Validate candidates we have not priced yet.
- *   3. Notify for validated games that were never successfully announced.
+ *   3. Notify validated games that were never announced, or whose 30-day
+ *      cooldown has expired.
  *   4. Mark successful notifications and persist pruned state.
  *
  * A Steam or KV failure throws before anything is saved, so the run can be
@@ -109,10 +110,7 @@ export async function runCheck(env: Env, deps: CheckDeps = {}): Promise<CheckRes
     seen[game.appId] = entry;
   }
 
-  const candidates = games.filter((game) => {
-    const entry = seen[game.appId];
-    return entry?.free === true && entry.notifiedAt === undefined;
-  });
+  const candidates = games.filter((game) => isNotificationDue(seen[game.appId], now));
 
   let notified: string[] = [];
   let notificationFailures: string[] = [];

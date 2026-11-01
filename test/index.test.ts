@@ -137,6 +137,51 @@ describe("runCheck", () => {
     expect(harness.validated).toHaveLength(validatedBefore);
   });
 
+  it("re-notifies a game after the one-month cooldown", async () => {
+    const harness = createHarness({
+      games: [{ appId: "10", name: "Alpha" }],
+      promotions: { "10": true },
+      kvRaw: JSON.stringify({
+        "10": {
+          firstSeenAt: NOW - 60 * DAY,
+          lastSeenAt: NOW - DAY,
+          free: true,
+          notifiedAt: NOW - 31 * DAY,
+        },
+      }),
+    });
+
+    const result = await harness.run();
+
+    expect(result.notified).toEqual(["10"]);
+    expect(harness.discordPayloads).toHaveLength(1);
+    expect(readState(harness.kv)["10"]?.notifiedAt).toBe(NOW);
+    // The stored validation is reused; no extra appdetails request.
+    expect(harness.validated).toEqual([]);
+  });
+
+  it("respects the cooldown for games announced less than a month ago", async () => {
+    const notifiedAt = NOW - 29 * DAY;
+    const harness = createHarness({
+      games: [{ appId: "10", name: "Alpha" }],
+      promotions: { "10": true },
+      kvRaw: JSON.stringify({
+        "10": {
+          firstSeenAt: NOW - 60 * DAY,
+          lastSeenAt: NOW - DAY,
+          free: true,
+          notifiedAt,
+        },
+      }),
+    });
+
+    const result = await harness.run();
+
+    expect(result.notified).toEqual([]);
+    expect(harness.discordPayloads).toHaveLength(0);
+    expect(readState(harness.kv)["10"]?.notifiedAt).toBe(notifiedAt);
+  });
+
   it("retries a failed Discord notification on the next run", async () => {
     const harness = createHarness({
       games: [{ appId: "10", name: "Alpha" }],

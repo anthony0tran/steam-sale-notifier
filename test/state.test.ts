@@ -1,14 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  NOTIFICATION_COOLDOWN_MS,
   SEEN_GAMES_KEY,
   SEEN_GAMES_MAX_AGE_MS,
   getSeenGames,
+  isNotificationDue,
   parseSeenGames,
   pruneSeenGames,
   saveSeenGames,
 } from "../src/state";
-import type { Env, SeenGames } from "../src/types";
+import type { Env, SeenGame, SeenGames } from "../src/types";
 import { MemoryKV, asKV } from "./helpers";
 
 const NOW = Date.UTC(2026, 10, 1, 12, 0, 0);
@@ -80,5 +82,43 @@ describe("pruneSeenGames", () => {
     };
 
     expect(Object.keys(pruneSeenGames(seen, NOW))).toEqual(["fresh", "edge"]);
+  });
+});
+
+describe("isNotificationDue", () => {
+  const seen = (overrides: Partial<SeenGame> = {}): SeenGame => ({
+    firstSeenAt: 0,
+    lastSeenAt: NOW,
+    free: true,
+    notifiedAt: NOW,
+    ...overrides,
+  });
+
+  it("ignores missing, unresolved and non-free entries", () => {
+    expect(isNotificationDue(undefined, NOW)).toBe(false);
+    expect(isNotificationDue(seen({ free: undefined }), NOW)).toBe(false);
+    expect(isNotificationDue(seen({ free: false, notifiedAt: undefined }), NOW)).toBe(false);
+  });
+
+  it("retries games whose notification never succeeded", () => {
+    expect(isNotificationDue(seen({ notifiedAt: undefined }), NOW)).toBe(true);
+  });
+
+  it("waits for the one-month cooldown", () => {
+    expect(
+      isNotificationDue(seen({ notifiedAt: NOW - NOTIFICATION_COOLDOWN_MS + 1 }), NOW),
+    ).toBe(false);
+  });
+
+  it("becomes due again exactly at the cooldown boundary", () => {
+    expect(
+      isNotificationDue(seen({ notifiedAt: NOW - NOTIFICATION_COOLDOWN_MS }), NOW),
+    ).toBe(true);
+  });
+
+  it("becomes due again after the cooldown", () => {
+    expect(
+      isNotificationDue(seen({ notifiedAt: NOW - NOTIFICATION_COOLDOWN_MS - 1 }), NOW),
+    ).toBe(true);
   });
 });

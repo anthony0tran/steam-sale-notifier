@@ -12,6 +12,28 @@ const BUNDLE_ROW =
   `<a href="https://store.steampowered.com/bundle/123/" class="search_result_row" ` +
   `data-ds-bundleid="123"><div class="col search_name"><span class="title">Some Bundle</span></div></a>`;
 
+const RICH_ROW = `
+<a href="https://store.steampowered.com/app/1583850/Asleep_Act_1/?snr=1_7_7_2300_150_1" data-ds-appid="1583850" data-ds-itemkey="App_1583850" class="search_result_row ds_collapse_flag app_impression_tracked">
+  <div class="search_capsule"><img src="https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/1583850/f24ce1b7829455b3b0c481374c2f909fdcba766a/capsule_231x87_alt_assets_1.jpg?t=1793381725"></div>
+  <div class="responsive_search_name_combined">
+    <div class="search_name ellipsis"><span class="title">Asleep: Act 1</span></div>
+    <div class="search_platforms"><span class="platform_img win"></span><span class="platform_img mac"></span><span class="platform_img linux"></span></div>
+    <div class="search_released responsive_secondrow">10 May, 2024</div>
+    <div class="search_reviewscore responsive_secondrow">
+      <span class="search_review_summary positive" data-tooltip-html="Very Positive&lt;br&gt;91% of the 316 user reviews for this game are positive."></span>
+    </div>
+    <div class="search_price_discount_combined responsive_secondrow" data-price-final="0">
+      <div class="discount_block search_discount_block" data-price-final="0" data-bundlediscount="0" data-discount="100">
+        <div class="discount_pct" aria-hidden="true">-100%</div>
+        <div class="discount_prices" aria-hidden="true">
+          <div class="discount_original_price">9,75€</div>
+          <div class="discount_final_price">0,00€</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</a>`;
+
 describe("parseSteamSearchHtml", () => {
   it("extracts app id, title and canonical store url", () => {
     const games = parseSteamSearchHtml(searchRow("570", "Dota 2"));
@@ -43,6 +65,56 @@ describe("parseSteamSearchHtml", () => {
     const html = searchRow("10", "Alpha") + searchRow("10", "Alpha again") + searchRow("20", "Beta");
 
     expect(parseSteamSearchHtml(html).map((game) => game.appId)).toEqual(["10", "20"]);
+  });
+
+  it("extracts image, platforms, release date, price and reviews", () => {
+    const [game] = parseSteamSearchHtml(RICH_ROW);
+
+    expect(game).toEqual({
+      appId: "1583850",
+      name: "Asleep: Act 1",
+      url: "https://store.steampowered.com/app/1583850/",
+      imageUrl:
+        "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/1583850/f24ce1b7829455b3b0c481374c2f909fdcba766a/capsule_231x87_alt_assets_1.jpg?t=1793381725",
+      platforms: ["Windows", "macOS", "Linux"],
+      releaseDate: "10 May, 2024",
+      price: { original: "9,75€", final: "0,00€", discountPercent: 100 },
+      review: {
+        summary: "Very Positive",
+        percent: 91,
+        count: 316,
+        tone: "positive",
+      },
+    });
+  });
+
+  it("keeps platform order and drops duplicates", () => {
+    const html =
+      `<a href="https://store.steampowered.com/app/30/" class="search_result_row" data-ds-appid="30">` +
+      `<span class="title">Gamma</span>` +
+      `<span class="platform_img linux"></span><span class="platform_img win"></span>` +
+      `<span class="platform_img win"></span></a>`;
+
+    expect(parseSteamSearchHtml(html)[0]?.platforms).toEqual(["Windows", "Linux"]);
+  });
+
+  it("falls back to the review tone when no tooltip is available", () => {
+    const html =
+      `<a href="https://store.steampowered.com/app/40/" class="search_result_row" data-ds-appid="40">` +
+      `<span class="title">Delta</span>` +
+      `<span class="search_review_summary mixed"></span></a>`;
+
+    expect(parseSteamSearchHtml(html)[0]?.review).toEqual({ tone: "mixed" });
+  });
+
+  it("omits metadata that is not present in the row", () => {
+    const [game] = parseSteamSearchHtml(searchRow("10", "Alpha"));
+
+    expect(game).toEqual({
+      appId: "10",
+      name: "Alpha",
+      url: "https://store.steampowered.com/app/10/",
+    });
   });
 });
 

@@ -1,4 +1,4 @@
-import type { SteamGame } from "./types";
+import type { GamePrice, GameReview, SteamGame } from "./types";
 import { errorMessage } from "./utils";
 
 const SEARCH_ENDPOINT = "https://store.steampowered.com/search/";
@@ -19,6 +19,27 @@ const NO_RESULTS_RE = /no results were returned/i;
 const ROW_RE = /<a\b(?=[^>]*\bdata-ds-appid=")[^>]*>[\s\S]*?<\/a>/gi;
 const APP_ID_RE = /data-ds-appid="([^"]+)"/i;
 const TITLE_RE = /<span\b[^>]*class="[^"]*\btitle\b[^"]*"[^>]*>([\s\S]*?)<\/span>/i;
+const IMAGE_RE = /<img\b[^>]*\bsrc="([^"]+)"/i;
+const PLATFORM_RE = /\bplatform_img\s+(win|mac|linux)\b/gi;
+const RELEASE_RE =
+  /<div\b[^>]*class="[^"]*\bsearch_released\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
+const DISCOUNT_PCT_RE =
+  /<div\b[^>]*class="[^"]*\bdiscount_pct\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
+const ORIGINAL_PRICE_RE =
+  /<div\b[^>]*class="[^"]*\bdiscount_original_price\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
+const FINAL_PRICE_RE =
+  /<div\b[^>]*class="[^"]*\bdiscount_final_price\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
+const REVIEW_TAG_RE =
+  /<span\b[^>]*class="[^"]*\bsearch_review_summary\b[^"]*"[^>]*>/i;
+const TOOLTIP_RE = /data-tooltip-html="([^"]*)"/i;
+const CLASS_RE = /class="([^"]*)"/i;
+
+const PLATFORM_LABELS: Record<string, string> = {
+  win: "Windows",
+  mac: "macOS",
+  linux: "Linux",
+};
+const PLATFORM_ORDER = ["Windows", "macOS", "Linux"];
 
 export class SteamError extends Error {
   readonly status: number | undefined;
@@ -89,6 +110,119 @@ function extractName(row: string): string | undefined {
   return name.length > 0 ? name : undefined;
 }
 
+function extractImageUrl(row: string): string | undefined {
+  const src = IMAGE_RE.exec(row)?.[1]?.trim();
+  return src ? decodeEntities(src) : undefined;
+}
+
+function extractPlatforms(row: string): string[] | undefined {
+  const found = new Set<string>();
+
+  for (const match of row.matchAll(PLATFORM_RE)) {
+    const label = PLATFORM_LABELS[match[1]?.toLowerCase() ?? ""];
+    if (label) {
+      found.add(label);
+    }
+  }
+
+  if (found.size === 0) {
+    return undefined;
+  }
+  return PLATFORM_ORDER.filter((platform) => found.has(platform));
+}
+
+function extractReleaseDate(row: string): string | undefined {
+  const match = RELEASE_RE.exec(row)?.[1];
+  if (!match) {
+    return undefined;
+  }
+
+  const releaseDate = cleanName(match);
+  return releaseDate.length > 0 ? releaseDate : undefined;
+}
+
+function extractPrice(row: string): GamePrice | undefined {
+  const original = cleanName(ORIGINAL_PRICE_RE.exec(row)?.[1] ?? "");
+  const final = cleanName(FINAL_PRICE_RE.exec(row)?.[1] ?? "");
+  if (!original && !final) {
+    return undefined;
+  }
+
+  const discountText = cleanName(DISCOUNT_PCT_RE.exec(row)?.[1] ?? "");
+  const discountPercent = Number.parseInt(discountText.replace(/[^\d]/g, ""), 10);
+
+  const price: GamePrice = {};
+  if (original) {
+    price.original = original;
+  }
+  if (final) {
+    price.final = final;
+  }
+  if (Number.isFinite(discountPercent)) {
+    price.discountPercent = discountPercent;
+  }
+  return price;
+}
+
+function extractReview(row: string): GameReview | undefined {
+  const tag = REVIEW_TAG_RE.exec(row)?.[0];
+  if (!tag) {
+    return undefined;
+  }
+
+  let summary: string | undefined;
+  let percent: number | undefined;
+  let count: number | undefined;
+
+  const tooltip = TOOLTIP_RE.exec(tag)?.[1];
+  if (tooltip) {
+    const decoded = decodeEntities(tooltip);
+    const [summaryPart = "", ...details] = decoded.split(/<br\s*\/?>/i);
+
+    const cleanedSummary = cleanName(summaryPart);
+    if (cleanedSummary) {
+      summary = cleanedSummary;
+    }
+
+    const detail = details.join(" ");
+    const percentMatch = /(\d+)%/.exec(detail);
+    if (percentMatch?.[1]) {
+      percent = Number.parseInt(percentMatch[1], 10);
+    }
+
+    const countMatch = /of the ([\d,]+) user reviews/i.exec(detail);
+    if (countMatch?.[1]) {
+      count = Number.parseInt(countMatch[1].replace(/,/g, ""), 10);
+    }
+  }
+
+  const classValue = CLASS_RE.exec(tag)?.[1] ?? "";
+  const toneValue = /\b(positive|mixed|negative)\b/i.exec(classValue)?.[1]?.toLowerCase();
+  const tone =
+    toneValue === "positive" || toneValue === "mixed" || toneValue === "negative"
+      ? toneValue
+      : undefined;
+
+  if (!summary && !tone) {
+    return undefined;
+  }
+
+  const review: GameReview = {};
+  if (summary) {
+    review.summary = summary;
+  }
+  if (percent !== undefined && Number.isFinite(percent)) {
+    review.percent = percent;
+  }
+  if (count !== undefined && Number.isFinite(count)) {
+    review.count = count;
+  }
+  if (tone) {
+    review.tone = tone;
+  }
+  return review;
+}
+
 /**
  * Extract games from a Steam search results page.
  *
@@ -117,11 +251,39 @@ export function parseSteamSearchHtml(html: string): SteamGame[] {
     }
 
     seen.add(rawAppId);
-    games.push({
+
+    const game: SteamGame = {
       appId: rawAppId,
       name,
       url: `https://store.steampowered.com/app/${rawAppId}/`,
-    });
+    };
+
+    const imageUrl = extractImageUrl(row);
+    if (imageUrl) {
+      game.imageUrl = imageUrl;
+    }
+
+    const platforms = extractPlatforms(row);
+    if (platforms) {
+      game.platforms = platforms;
+    }
+
+    const releaseDate = extractReleaseDate(row);
+    if (releaseDate) {
+      game.releaseDate = releaseDate;
+    }
+
+    const price = extractPrice(row);
+    if (price) {
+      game.price = price;
+    }
+
+    const review = extractReview(row);
+    if (review) {
+      game.review = review;
+    }
+
+    games.push(game);
   }
 
   return games;

@@ -24,6 +24,10 @@ Worker ──► Steam search (maxprice=free, specials=1, cc=nl, English)
 
 ## Setup
 
+For a complete from-scratch walkthrough — new Cloudflare account, KV namespace,
+Discord webhook, first deploy, and GitHub Actions secrets — see
+[DEPLOYMENT.md](DEPLOYMENT.md).
+
 ```bash
 npm install
 ```
@@ -87,7 +91,7 @@ Pushes to `main` deploy automatically once the Cloudflare secrets are set up
 | Command | Purpose |
 |---|---|
 | `npm run dev` | Local Worker with `--test-scheduled` |
-| `npm test` | Vitest unit tests (45 tests) |
+| `npm test` | Vitest unit tests (66 tests) |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run deploy` | Deploy with Wrangler |
 | `npm run tail` | Stream production logs |
@@ -97,8 +101,9 @@ Pushes to `main` deploy automatically once the Cloudflare secrets are set up
 1. **Search** — `store.steampowered.com/search/?maxprice=free&specials=1&supportedlang=english&cc=nl&l=english`,
    paginated up to 8 pages and deduplicated by app id.
 2. **Parse** — each `a.search_result_row` with a single numeric `data-ds-appid`
-   is normalized to `{ appId, name, url }`. Bundle rows and rows without a
-   title are skipped.
+   is normalized to `{ appId, name, url }` plus the capsule image, platforms,
+   release date, price/discount and review summary when present. Bundle rows
+   and rows without a title are skipped.
 3. **Validate** — only *new or unresolved* candidates are sent to
    `appdetails?filters=basic,price_overview&cc=nl`. A game qualifies when:
    - `discount_percent === 100`, and
@@ -118,30 +123,76 @@ Pushes to `main` deploy automatically once the Cloudflare secrets are set up
    }
    ```
 
-5. **Notify** — games with `free: true` and no `notifiedAt` are posted in
-   batches of up to 10 embeds (Discord's limit). A game is marked notified only
-   after Discord accepts the message, so failed posts are retried next run.
+5. **Notify** — games that are free and either have no successful notification
+   or were last announced at least **30 days** ago are posted in batches of up
+   to 10 embeds (Discord's limit). A game is marked notified only after Discord
+   accepts the message, so failed posts are retried next run.
 
-### State retention
+### State retention and cooldown
 
 Entries whose `lastSeenAt` is older than **90 days** are pruned. A promotion
 that ends and returns months later is therefore announced again instead of
 being blocked forever by a monotonically growing ID list (a flaw in the
 original plan).
 
+A successfully announced game is not posted again for **30 days**
+(`NOTIFICATION_COOLDOWN_MS`). After the cooldown, if the game is still or again
+free, it is announced again and the cooldown restarts. This means a recurring
+sale is re-announced roughly monthly; a new sale that starts inside the
+remaining cooldown is not announced until the cooldown expires (and is missed if
+it ends first). Reducing the constant changes the cooldown for all games.
+
 The legacy PRD format `["570","730"]` is migrated automatically and treated as
 already notified, so upgrading does not spam the channel.
+
+### Discord embeds
+
+Each announcement is built from the same search result row, so no extra
+requests are made:
+
+- capsule image
+- title linked to the Steam store page
+- platforms (`Windows · macOS · Linux`)
+- release date
+- price as `~~9,75€~~ **0,00€** -100%`
+- review summary with 👍/🤔/👎, percentage and review count when Steam exposes it
+
+The separate `appdetails` call is still used only to confirm the app is a
+100%-off game and to exclude DLC, software and soundtracks.
+
+## Manual trigger
+
+The Worker has a token-protected endpoint that runs the same check as the cron:
+
+```bash
+curl -H "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
+  https://steam-sale-notifier.<subdomain>.workers.dev/check
+```
+
+Set the token once with `npx wrangler secret put MANUAL_TRIGGER_TOKEN` (any long
+random string). `GET` and `POST` are accepted; the JSON response is the same
+summary that appears in the logs. `GET /` returns a small health response.
+
+If `MANUAL_TRIGGER_TOKEN` is not set, `/check` returns `503` and the cron keeps
+working. The endpoint writes real KV state and posts to Discord, so avoid
+calling it concurrently with another run; sequential calls are safe because
+already-notified games are skipped.
 
 ## Tests
 
 `npm test` covers:
 
-- HTML parsing, entity decoding, bundle skipping and pagination/deduplication
+- HTML parsing, entity decoding, bundle skipping, pagination/deduplication, and
+  metadata extraction (image, platforms, release date, price, reviews)
+- Discord payloads: batching, title truncation, strikethrough pricing, review
+  tone, 429 retry and partial batch failure
 - 100%-off validation, including Steam's `final` quirk and non-game app types
-- KV persistence, legacy migration, corrupt state and 90-day pruning
-- Discord batching, title truncation, 429 retry, partial batch failure
+- KV persistence, legacy migration, corrupt state, 90-day pruning and the
+  30-day notification cooldown
 - End-to-end `runCheck`: empty state, dedupe on the second run, Discord retry,
-  validation retry, Steam failure (no KV write), and the `scheduled` handler
+  validation retry, Steam failure (no KV write)
+- HTTP handling: health response, bearer-token auth, 401/503/405 paths, manual
+  trigger summary, and the `scheduled` handler
 
 CI runs the same typecheck, test and build steps on every push and pull request.
 
@@ -213,8 +264,7 @@ wrangler.jsonc cron trigger and KV binding
 
 ## Possible next steps
 
-- Manual `GET /check` endpoint (add a lock if you do this, to avoid concurrent
-  double-posting)
 - Genre filtering and discount end times in embeds
-- Durable Object instead of KV for atomic dedupe
+- Durable Object instead of KV for atomic dedupe and a run lock
+- Per-token rate limiting for the manual endpoint
 - Test coverage reports in CI and tag-based release deployments

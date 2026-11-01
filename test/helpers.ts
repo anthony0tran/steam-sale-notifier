@@ -53,7 +53,6 @@ export function searchRow(appId: string, name: string): string {
     `<a href="https://store.steampowered.com/app/${appId}/?snr=1_7_15__13" ` +
     `class="search_result_row ds_collapse_flag" data-ds-appid="${appId}" ` +
     `data-ds-itemkey="App_${appId}">` +
-    `<div class="col search_capsule"><img src="https://cdn.example/${appId}.jpg"></div>` +
     `<div class="col search_name"><span class="title">${name}</span></div>` +
     `</a>`
   );

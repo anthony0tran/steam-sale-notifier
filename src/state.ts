@@ -2,6 +2,8 @@ import type { Env, SeenGame, SeenGames } from "./types";
 
 export const SEEN_GAMES_KEY = "steam:seen-games";
 export const SEEN_GAMES_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+/** A game can be announced again once this long has passed since the last post. */
+export const NOTIFICATION_COOLDOWN_MS = 30 * 24 * 60 * 60 * 1000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -74,6 +76,26 @@ export async function getSeenGames(env: Env, now: number = Date.now()): Promise<
 
 export async function saveSeenGames(env: Env, seen: SeenGames): Promise<void> {
   await env.SEEN_GAMES.put(SEEN_GAMES_KEY, JSON.stringify(seen));
+}
+
+/**
+ * Whether a currently-validated game should be announced now.
+ *
+ * Unresolved or non-free entries are never due. Missing `notifiedAt` means a
+ * previous post failed (retry immediately). Otherwise the game becomes due
+ * again after the cooldown, so a later sale is announced instead of being
+ * blocked forever by the first notification.
+ */
+export function isNotificationDue(entry: SeenGame | undefined, now: number): boolean {
+  if (!entry || entry.free !== true) {
+    return false;
+  }
+
+  if (entry.notifiedAt === undefined) {
+    return true;
+  }
+
+  return now - entry.notifiedAt >= NOTIFICATION_COOLDOWN_MS;
 }
 
 /**

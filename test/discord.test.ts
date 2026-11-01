@@ -33,6 +33,67 @@ describe("formatEmbed", () => {
     });
   });
 
+  it("renders image, platforms, release date, price and reviews", () => {
+    const imageUrl =
+      "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/1583850/capsule.jpg?t=1793381725";
+    const game: SteamGame = {
+      appId: "1583850",
+      name: "Asleep: Act 1",
+      url: "https://store.steampowered.com/app/1583850/",
+      imageUrl,
+      platforms: ["Windows", "macOS", "Linux"],
+      releaseDate: "10 May, 2024",
+      price: { original: "9,75€", final: "0,00€", discountPercent: 100 },
+      review: {
+        summary: "Very Positive",
+        percent: 91,
+        count: 316,
+        tone: "positive",
+      },
+    };
+
+    expect(formatEmbed(game)).toEqual({
+      title: "Asleep: Act 1",
+      url: "https://store.steampowered.com/app/1583850/",
+      description: "Now temporarily free on Steam.",
+      color: 3_066_993,
+      fields: [
+        { name: "Platforms", value: "Windows · macOS · Linux", inline: true },
+        { name: "Release date", value: "10 May, 2024", inline: true },
+        { name: "Price", value: "~~9,75€~~ **0,00€** -100%", inline: true },
+        {
+          name: "Reviews",
+          value: "👍 Very Positive · 91% · 316 reviews",
+          inline: false,
+        },
+      ],
+      image: { url: imageUrl },
+    });
+  });
+
+  it("renders the review tone when no summary is available", () => {
+    const [base] = games(1);
+
+    expect(
+      formatEmbed({ ...(base as SteamGame), review: { tone: "mixed" } }),
+    ).toMatchObject({
+      fields: [{ name: "Reviews", value: "🤔", inline: false }],
+    });
+  });
+
+  it("does not repeat the original price when both prices are equal", () => {
+    const [base] = games(1);
+
+    expect(
+      formatEmbed({
+        ...(base as SteamGame),
+        price: { original: "0,00€", final: "0,00€", discountPercent: 100 },
+      }),
+    ).toMatchObject({
+      fields: [{ name: "Price", value: "**0,00€** -100%", inline: true }],
+    });
+  });
+
   it("truncates titles to Discord's limit", () => {
     const [game] = games(1);
     const embed = formatEmbed({ ...(game as SteamGame), name: "x".repeat(300) });

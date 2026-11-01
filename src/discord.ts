@@ -1,4 +1,12 @@
-import type { DiscordEmbed, DiscordWebhookPayload, Env, SteamGame } from "./types";
+import type {
+  DiscordEmbed,
+  DiscordEmbedField,
+  DiscordWebhookPayload,
+  Env,
+  GamePrice,
+  GameReview,
+  SteamGame,
+} from "./types";
 import { chunk, delay, errorMessage } from "./utils";
 
 const EMBED_COLOR = 3_066_993;
@@ -8,6 +16,12 @@ const MAX_ATTEMPTS = 3;
 const MAX_RETRY_DELAY_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_ERROR_BODY_LENGTH = 500;
+
+const REVIEW_TONE_EMOJI: Record<NonNullable<GameReview["tone"]>, string> = {
+  positive: "👍",
+  mixed: "🤔",
+  negative: "👎",
+};
 
 export class DiscordError extends Error {
   readonly status: number | undefined;
@@ -25,12 +39,97 @@ export interface DiscordSendResult {
 }
 
 export function formatEmbed(game: SteamGame): DiscordEmbed {
-  return {
+  const embed: DiscordEmbed = {
     title: truncate(game.name, MAX_TITLE_LENGTH),
     url: game.url,
     description: "Now temporarily free on Steam.",
     color: EMBED_COLOR,
   };
+
+  const fields = buildFields(game);
+  if (fields.length > 0) {
+    embed.fields = fields;
+  }
+
+  if (game.imageUrl) {
+    embed.image = { url: game.imageUrl };
+  }
+
+  return embed;
+}
+
+function buildFields(game: SteamGame): DiscordEmbedField[] {
+  const fields: DiscordEmbedField[] = [];
+
+  if (game.platforms && game.platforms.length > 0) {
+    fields.push({
+      name: "Platforms",
+      value: game.platforms.join(" · "),
+      inline: true,
+    });
+  }
+
+  if (game.releaseDate) {
+    fields.push({
+      name: "Release date",
+      value: game.releaseDate,
+      inline: true,
+    });
+  }
+
+  const price = formatPrice(game.price);
+  if (price) {
+    fields.push({ name: "Price", value: price, inline: true });
+  }
+
+  const review = formatReview(game.review);
+  if (review) {
+    fields.push({ name: "Reviews", value: review, inline: false });
+  }
+
+  return fields;
+}
+
+function formatPrice(price: GamePrice | undefined): string | undefined {
+  if (!price) {
+    return undefined;
+  }
+
+  const parts: string[] = [];
+  if (price.original && price.original !== price.final) {
+    parts.push(`~~${price.original}~~`);
+  }
+  if (price.final) {
+    parts.push(`**${price.final}**`);
+  }
+  if (price.discountPercent !== undefined && price.discountPercent > 0) {
+    parts.push(`-${price.discountPercent}%`);
+  }
+
+  return parts.length > 0 ? parts.join(" ") : undefined;
+}
+
+function formatReview(review: GameReview | undefined): string | undefined {
+  if (!review) {
+    return undefined;
+  }
+
+  const headline = [
+    review.tone ? REVIEW_TONE_EMOJI[review.tone] : undefined,
+    review.summary,
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const detail: string[] = [];
+  if (review.percent !== undefined) {
+    detail.push(`${review.percent}%`);
+  }
+  if (review.count !== undefined) {
+    detail.push(`${review.count.toLocaleString("en-US")} reviews`);
+  }
+
+  return [headline, detail.join(" · ")].filter(Boolean).join(" · ") || undefined;
 }
 
 export function buildDiscordPayloads(games: readonly SteamGame[]): DiscordWebhookPayload[] {
