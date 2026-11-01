@@ -1,24 +1,20 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "steam-sale-notifier",
-  "main": "src/index.ts",
-  "compatibility_date": "2026-10-30",
-
-  "observability": {
-    "enabled": true
-  },
-
-  "triggers": {
-    // Every 30 minutes (UTC).
-    "crons": ["*/30 * * * *"]
-  },
-
-  "kv_namespaces": [
-    {
-      "binding": "SEEN_GAMES",
-      // Replace with the id printed by:
-      //   npx wrangler kv namespace create SEEN_GAMES
-      "id": "<KV_NAMESPACE_ID>"
-    }
-  ]
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "steam-sale-notifier",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-10-30",
+	"observability": {
+		"enabled": true
+	},
+	"triggers": {
+		"crons": [
+			"*/30 * * * *"
+		]
+	},
+	"kv_namespaces": [
+		{
+			"binding": "SEEN_GAMES",
+			"id": "2668a36f60204356b75a75bceec26966"
+		}
+	]
 }
