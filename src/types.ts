@@ -1,6 +1,8 @@
 export interface Env {
   SEEN_GAMES: KVNamespace;
   DISCORD_WEBHOOK_URL: string;
+  /** Optional bearer token that enables the manual GET/POST /check endpoint. */
+  MANUAL_TRIGGER_TOKEN?: string;
 }
 
 export interface SteamGame {

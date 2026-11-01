@@ -1,2 +1,5 @@
 # Copy to .dev.vars (never commit .dev.vars) and fill in a test webhook.
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<id>/<token>
+
+# Optional: enables the token-protected manual check endpoint locally.
+# MANUAL_TRIGGER_TOKEN=local-dev-token-change-me

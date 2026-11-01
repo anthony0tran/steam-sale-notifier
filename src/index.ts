@@ -155,6 +155,46 @@ export async function runCheck(env: Env, deps: CheckDeps = {}): Promise<CheckRes
 }
 
 export default {
+  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/") {
+      return jsonResponse({ ok: true, service: "steam-sale-notifier" });
+    }
+
+    if (url.pathname !== "/check") {
+      return jsonResponse({ ok: false, error: "not found" }, 404);
+    }
+
+    if (request.method !== "GET" && request.method !== "POST") {
+      return jsonResponse({ ok: false, error: "method not allowed" }, 405, {
+        allow: "GET, POST",
+      });
+    }
+
+    const token = env.MANUAL_TRIGGER_TOKEN;
+    if (!token) {
+      return jsonResponse(
+        { ok: false, error: "MANUAL_TRIGGER_TOKEN is not configured" },
+        503,
+      );
+    }
+
+    if (!isAuthorized(request, token)) {
+      return jsonResponse({ ok: false, error: "unauthorized" }, 401, {
+        "www-authenticate": "Bearer",
+      });
+    }
+
+    try {
+      const result = await runCheck(env);
+      return jsonResponse({ ok: true, ...result });
+    } catch (cause) {
+      console.error("Manual Steam free games check failed", errorMessage(cause));
+      return jsonResponse({ ok: false, error: errorMessage(cause) }, 500);
+    }
+  },
+
   async scheduled(
     _controller: ScheduledController,
     env: Env,
@@ -169,3 +209,45 @@ export default {
     }
   },
 } satisfies ExportedHandler<Env>;
+
+function jsonResponse(
+  body: unknown,
+  status = 200,
+  headers: Record<string, string> = {},
+): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      ...headers,
+    },
+  });
+}
+
+function isAuthorized(request: Request, token: string): boolean {
+  const header = request.headers.get("authorization");
+  if (!header) {
+    return false;
+  }
+
+  const [scheme, value] = header.split(" ");
+  if (!value || scheme?.toLowerCase() !== "bearer") {
+    return false;
+  }
+
+  return timingSafeEqual(value, token);
+}
+
+/** Compare without early exit so the token check does not leak its prefix. */
+function timingSafeEqual(a: string, b: string): boolean {
+  const maxLength = Math.max(a.length, b.length);
+  let difference = a.length ^ b.length;
+
+  for (let index = 0; index < maxLength; index++) {
+    const aCode = index < a.length ? a.charCodeAt(index) : 0;
+    const bCode = index < b.length ? b.charCodeAt(index) : 0;
+    difference |= aCode ^ bCode;
+  }
+
+  return difference === 0;
+}

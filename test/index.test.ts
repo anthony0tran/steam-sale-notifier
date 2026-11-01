@@ -17,11 +17,16 @@ interface HarnessOptions {
   validationStatus?: number;
   discordStatus?: number;
   kvRaw?: string;
+  triggerToken?: string;
 }
 
 function createHarness(options: HarnessOptions) {
   const kv = new MemoryKV(options.kvRaw === undefined ? {} : { [SEEN_GAMES_KEY]: options.kvRaw });
-  const env: Env = { SEEN_GAMES: asKV(kv), DISCORD_WEBHOOK_URL: WEBHOOK };
+  const env: Env = {
+    SEEN_GAMES: asKV(kv),
+    DISCORD_WEBHOOK_URL: WEBHOOK,
+    MANUAL_TRIGGER_TOKEN: options.triggerToken,
+  };
   const promotions = options.promotions ?? {};
   const discordPayloads: DiscordWebhookPayload[] = [];
   const validated: string[] = [];
@@ -251,5 +256,149 @@ describe("scheduled handler", () => {
 
     expect(harness.discordPayloads).toHaveLength(1);
     expect(readState(harness.kv)["10"]?.notifiedAt).toBeTypeOf("number");
+  });
+});
+
+describe("manual check endpoint", () => {
+  const callWorker = async (
+    harness: ReturnType<typeof createHarness>,
+    path: string,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    vi.stubGlobal("fetch", harness.fetchImpl);
+    try {
+      return await worker.fetch(
+        new Request(`https://worker.example${path}`, init),
+        harness.env,
+        {} as unknown as ExecutionContext,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  };
+
+  it("serves a health response at the root", async () => {
+    const harness = createHarness({ games: [], triggerToken: "secret" });
+
+    const response = await callWorker(harness, "/");
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      service: "steam-sale-notifier",
+    });
+    expect(harness.validated).toEqual([]);
+  });
+
+  it("rejects requests without a valid bearer token", async () => {
+    const harness = createHarness({
+      games: [{ appId: "10", name: "Alpha" }],
+      promotions: { "10": true },
+      triggerToken: "secret",
+    });
+
+    const missing = await callWorker(harness, "/check");
+    const wrong = await callWorker(harness, "/check", {
+      headers: { authorization: "Bearer wrong" },
+    });
+
+    expect(missing.status).toBe(401);
+    expect(wrong.status).toBe(401);
+    expect(missing.headers.get("www-authenticate")).toBe("Bearer");
+    expect(harness.validated).toEqual([]);
+    expect(harness.discordPayloads).toHaveLength(0);
+    expect(harness.kv.store.size).toBe(0);
+  });
+
+  it("returns 503 when no manual token is configured", async () => {
+    const harness = createHarness({ games: [], triggerToken: undefined });
+
+    const response = await callWorker(harness, "/check", {
+      headers: { authorization: "Bearer anything" },
+    });
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      error: "MANUAL_TRIGGER_TOKEN is not configured",
+    });
+    expect(harness.validated).toEqual([]);
+  });
+
+  it("runs the check with a valid token and returns the summary", async () => {
+    const harness = createHarness({
+      games: [{ appId: "10", name: "Alpha" }],
+      promotions: { "10": true },
+      triggerToken: "secret",
+    });
+
+    const response = await callWorker(harness, "/check", {
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      gamesFound: number;
+      notified: string[];
+      notificationFailures: string[];
+    };
+    expect(body).toMatchObject({
+      ok: true,
+      gamesFound: 1,
+      notified: ["10"],
+      notificationFailures: [],
+    });
+    expect(harness.discordPayloads).toHaveLength(1);
+    expect(readState(harness.kv)["10"]?.notifiedAt).toBeTypeOf("number");
+  });
+
+  it("accepts POST as well as GET", async () => {
+    const harness = createHarness({
+      games: [{ appId: "10", name: "Alpha" }],
+      promotions: { "10": true },
+      triggerToken: "secret",
+    });
+
+    const response = await callWorker(harness, "/check", {
+      method: "POST",
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(response.status).toBe(200);
+    expect(harness.discordPayloads).toHaveLength(1);
+  });
+
+  it("returns 500 with an error message when the check fails", async () => {
+    const harness = createHarness({
+      games: [{ appId: "10", name: "Alpha" }],
+      searchStatus: 500,
+      triggerToken: "secret",
+    });
+
+    const response = await callWorker(harness, "/check", {
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      error: "Steam search returned HTTP 500",
+    });
+    expect(harness.kv.store.size).toBe(0);
+  });
+
+  it("returns 404 for unknown paths and 405 for other methods", async () => {
+    const harness = createHarness({ games: [], triggerToken: "secret" });
+
+    const notFound = await callWorker(harness, "/nope");
+    const notAllowed = await callWorker(harness, "/check", {
+      method: "DELETE",
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(notFound.status).toBe(404);
+    expect(notAllowed.status).toBe(405);
+    expect(notAllowed.headers.get("allow")).toBe("GET, POST");
   });
 });
