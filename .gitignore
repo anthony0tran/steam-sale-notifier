@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Wrangler / Miniflare local state
+.wrangler/
+.mf/
+
+# Local secrets and environment files
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+!.env.example
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Test output
+coverage/
+
+# Logs
+*.log
+
+# OS noise
+.DS_Store
+Thumbs.db
