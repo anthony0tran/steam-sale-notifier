@@ -42,7 +42,6 @@ export function formatEmbed(game: SteamGame): DiscordEmbed {
   const embed: DiscordEmbed = {
     title: truncate(game.name, MAX_TITLE_LENGTH),
     url: game.url,
-    description: "Now temporarily free on Steam.",
     color: EMBED_COLOR,
   };
 
@@ -132,10 +131,54 @@ function formatReview(review: GameReview | undefined): string | undefined {
   return [headline, detail.join(" · ")].filter(Boolean).join(" · ") || undefined;
 }
 
-export function buildDiscordPayloads(games: readonly SteamGame[]): DiscordWebhookPayload[] {
-  return chunk(games, MAX_EMBEDS_PER_MESSAGE).map((batch) => ({
-    embeds: batch.map(formatEmbed),
-  }));
+export function buildDiscordPayloads(
+  games: readonly SteamGame[],
+  mentionsByAppId: ReadonlyMap<string, readonly string[]> = new Map(),
+): DiscordWebhookPayload[] {
+  return chunk(games, MAX_EMBEDS_PER_MESSAGE).map((batch) =>
+    buildPayload(batch, mentionsByAppId),
+  );
+}
+
+/**
+ * Build one webhook message. Mentions are aggregated across the batch and
+ * deduplicated so a user is pinged at most once per message. `allowed_mentions`
+ * keeps every other possible ping disabled while still allowing configured
+ * user ids to be notified.
+ */
+function buildPayload(
+  games: readonly SteamGame[],
+  mentionsByAppId: ReadonlyMap<string, readonly string[]>,
+): DiscordWebhookPayload {
+  const payload: DiscordWebhookPayload = { embeds: games.map(formatEmbed) };
+
+  const mentions: string[] = [];
+  const seen = new Set<string>();
+  for (const game of games) {
+    for (const mention of mentionsByAppId.get(game.appId) ?? []) {
+      if (!seen.has(mention)) {
+        seen.add(mention);
+        mentions.push(mention);
+      }
+    }
+  }
+
+  if (mentions.length === 0) {
+    return payload;
+  }
+
+  payload.content = mentions.join(" ");
+  payload.allowed_mentions = { parse: [] };
+
+  const userIds = mentions
+    .map((mention) => /^<@!?(\d{17,20})>$/.exec(mention)?.[1])
+    .filter((id): id is string => id !== undefined);
+
+  if (userIds.length > 0) {
+    payload.allowed_mentions.users = [...new Set(userIds)];
+  }
+
+  return payload;
 }
 
 async function readBody(response: Response): Promise<string> {
@@ -240,6 +283,7 @@ export async function sendDiscordNotifications(
   env: Env,
   games: readonly SteamGame[],
   fetchImpl: typeof fetch = fetch,
+  mentionsByAppId: ReadonlyMap<string, readonly string[]> = new Map(),
 ): Promise<DiscordSendResult> {
   const result: DiscordSendResult = { sentAppIds: [], failedAppIds: [] };
   if (games.length === 0) {
@@ -252,7 +296,7 @@ export async function sendDiscordNotifications(
   }
 
   for (const batch of chunk(games, MAX_EMBEDS_PER_MESSAGE)) {
-    const payload: DiscordWebhookPayload = { embeds: batch.map(formatEmbed) };
+    const payload = buildPayload(batch, mentionsByAppId);
 
     try {
       await postWithRetry(webhookUrl, payload, fetchImpl);

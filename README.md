@@ -13,6 +13,7 @@ Cloudflare Cron (*/30 * * * *)
 Worker ──► Steam search (maxprice=free, specials=1, cc=nl, English)
         │        └──► appdetails: confirm 100% off + app type is "game"
         ├──► Workers KV: seen games (last seen, validated free, notified)
+        ├──► Steam Web API: configured users' owned games (optional mentions)
         └──► Discord webhook: batched embeds
 ```
 
@@ -91,7 +92,7 @@ Pushes to `main` deploy automatically once the Cloudflare secrets are set up
 | Command | Purpose |
 |---|---|
 | `npm run dev` | Local Worker with `--test-scheduled` |
-| `npm test` | Vitest unit tests (66 tests) |
+| `npm test` | Vitest unit tests (91 tests) |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run deploy` | Deploy with Wrangler |
 | `npm run tail` | Stream production logs |
@@ -160,6 +161,65 @@ requests are made:
 The separate `appdetails` call is still used only to confirm the app is a
 100%-off game and to exclude DLC, software and soundtracks.
 
+## Mentions for people who don't own the game
+
+Optional. When a validated free game is about to be posted, the Worker can read
+each configured user's Steam library and ping the people who do not own it yet.
+
+### 1. Configure the users
+
+Set the `MENTION_USERS` **variable** in the Cloudflare dashboard
+(**Worker → Settings → Variables and Secrets → Variables**) or in a `vars`
+entry in `wrangler.jsonc`. The value is a JSON array:
+
+```json
+[
+  {
+    "discordId": "123456789012345678",
+    "discordUsername": "alice",
+    "steamId": "76561198000000000"
+  },
+  {
+    "discordId": "234567890123456789",
+    "discordUsername": "bob",
+    "steamId": "bob_steam"
+  }
+]
+```
+
+- `discordId` is the numeric Discord user id (enable **Developer Mode**, then
+  right-click the user and choose **Copy User ID**). It is required for a real
+  ping. A `discordUsername` without an id is posted as plain `@name` text and
+  does not notify the user.
+- `discordUsername` is optional and is only used as a readable fallback and log
+  label.
+- `steamId` accepts a SteamID64, a vanity name, or a steamcommunity.com profile
+  URL.
+- Invalid entries are ignored with a console warning; they cannot stop games
+  from being posted.
+
+### 2. Add a Steam Web API key
+
+```bash
+npx wrangler secret put STEAM_API_KEY
+```
+
+Create the key at <https://steamcommunity.com/dev/apikey>. The configured Steam
+profile's **Game details** privacy must be public. If the library cannot be
+read (private profile, bad key, Steam outage) that user is skipped, a warning is
+logged, and the game notification is still sent.
+
+### Behavior
+
+- Libraries are fetched at most once per check, and only when at least one game
+  is about to be announced.
+- Users who already own the app are not mentioned.
+- Mentions are deduplicated per Discord message; a single content line prefixes
+  each batch of up to 10 embeds.
+- Failed library lookups appear in `mentionFailures` in the logs and the manual
+  `/check` response.
+- `MENTION_USERS` has no effect without `STEAM_API_KEY`.
+
 ## Manual trigger
 
 The Worker has a token-protected endpoint that runs the same check as the cron:
@@ -185,8 +245,11 @@ already-notified games are skipped.
 - HTML parsing, entity decoding, bundle skipping, pagination/deduplication, and
   metadata extraction (image, platforms, release date, price, reviews)
 - Discord payloads: batching, title truncation, strikethrough pricing, review
-  tone, 429 retry and partial batch failure
+  tone, mention aggregation, 429 retry and partial batch failure
 - 100%-off validation, including Steam's `final` quirk and non-game app types
+- Steam library ownership lookups: SteamID64/profile URL parsing, vanity
+  resolution, private libraries and API failures
+- `MENTION_USERS` parsing, mention formatting and safe fallback behavior
 - KV persistence, legacy migration, corrupt state, 90-day pruning and the
   30-day notification cooldown
 - End-to-end `runCheck`: empty state, dedupe on the second run, Discord retry,
@@ -246,7 +309,9 @@ contains `<KV_NAMESPACE_ID>` or if either Cloudflare secret is missing.
 - **Discord limits.** Messages contain at most 10 embeds; 429s honour
   `retry_after` (capped at 5 s, three attempts per batch).
 - **Secrets.** `DISCORD_WEBHOOK_URL` comes from `wrangler secret` in production
-  and `.dev.vars` locally. Never place it in `wrangler.jsonc`.
+  and `.dev.vars` locally. Never place it in `wrangler.jsonc`. `STEAM_API_KEY`
+  (needed only for mentions) is also a secret; `MENTION_USERS` is a plain text
+  variable.
 
 ## Project layout
 
@@ -254,6 +319,8 @@ contains `<KV_NAMESPACE_ID>` or if either Cloudflare secret is missing.
 src/
   index.ts     scheduled handler + orchestration
   steam.ts     search fetch/parse, appdetails validation
+  steam-library.ts  Steam Web API library/ownership lookups
+  mentions.ts  MENTION_USERS parsing and Discord mention formatting
   state.ts     KV state model, legacy migration, pruning
   discord.ts   embed formatting, batching, retries
   types.ts     Env / SteamGame / state / payload types

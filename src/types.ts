@@ -3,6 +3,25 @@ export interface Env {
   DISCORD_WEBHOOK_URL: string;
   /** Optional bearer token that enables the manual GET/POST /check endpoint. */
   MANUAL_TRIGGER_TOKEN?: string;
+  /**
+   * Optional JSON array of Discord users to mention when they do not own a
+   * newly announced game. See `MentionTarget`.
+   */
+  MENTION_USERS?: string;
+  /** Steam Web API key used to read the configured users' game libraries. */
+  STEAM_API_KEY?: string;
+}
+
+/**
+ * One entry in the `MENTION_USERS` JSON array. `discordId` is the numeric
+ * Discord user id and is required for a real ping; `discordUsername` is used
+ * as readable fallback text when no id is configured.
+ */
+export interface MentionTarget {
+  discordId?: string;
+  discordUsername?: string;
+  /** SteamID64, vanity name, or a steamcommunity.com profile URL. */
+  steamId: string;
 }
 
 export interface GamePrice {
@@ -65,5 +84,11 @@ export interface DiscordEmbed {
 }
 
 export interface DiscordWebhookPayload {
+  /** Optional message text used for user mentions. */
+  content?: string;
   embeds: DiscordEmbed[];
+  allowed_mentions?: {
+    parse?: Array<"roles" | "users" | "everyone">;
+    users?: string[];
+  };
 }

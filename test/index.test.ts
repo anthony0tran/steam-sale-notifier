@@ -9,6 +9,10 @@ import { MemoryKV, asKV, htmlResponse, jsonResponse, mockFetch, searchRows } fro
 const NOW = Date.UTC(2026, 10, 1, 12, 0, 0);
 const DAY = 24 * 60 * 60 * 1000;
 const WEBHOOK = "https://discord.com/api/webhooks/123/token";
+const STEAM_ID_A = "76561198000000001";
+const STEAM_ID_B = "76561198000000002";
+const DISCORD_ID_A = "111111111111111111";
+const DISCORD_ID_B = "222222222222222222";
 
 interface HarnessOptions {
   games: ReadonlyArray<{ appId: string; name: string }>;
@@ -18,6 +22,11 @@ interface HarnessOptions {
   discordStatus?: number;
   kvRaw?: string;
   triggerToken?: string;
+  mentionUsers?: unknown;
+  steamApiKey?: string;
+  /** SteamID64 -> app ids owned by that account. Missing ids look private. */
+  libraries?: Record<string, string[]>;
+  libraryStatus?: number;
 }
 
 function createHarness(options: HarnessOptions) {
@@ -26,14 +35,20 @@ function createHarness(options: HarnessOptions) {
     SEEN_GAMES: asKV(kv),
     DISCORD_WEBHOOK_URL: WEBHOOK,
     MANUAL_TRIGGER_TOKEN: options.triggerToken,
+    MENTION_USERS:
+      options.mentionUsers === undefined ? undefined : JSON.stringify(options.mentionUsers),
+    STEAM_API_KEY: options.steamApiKey,
   };
   const promotions = options.promotions ?? {};
+  const libraries = options.libraries ?? {};
   const discordPayloads: DiscordWebhookPayload[] = [];
   const validated: string[] = [];
+  const libraryRequests: string[] = [];
 
   let searchStatus = options.searchStatus ?? 200;
   let validationStatus = options.validationStatus ?? 200;
   let discordStatus = options.discordStatus ?? 200;
+  let libraryStatus = options.libraryStatus ?? 200;
 
   const fetchImpl = mockFetch((rawUrl, init) => {
     const url = new URL(rawUrl);
@@ -63,6 +78,25 @@ function createHarness(options: HarnessOptions) {
       });
     }
 
+    if (url.hostname === "api.steampowered.com" && url.pathname === "/IPlayerService/GetOwnedGames/v1/") {
+      const steamId = url.searchParams.get("steamid") ?? "";
+      libraryRequests.push(steamId);
+      if (libraryStatus !== 200) {
+        return new Response("library failed", { status: libraryStatus });
+      }
+
+      const owned = libraries[steamId];
+      if (!owned) {
+        return jsonResponse({ response: {} });
+      }
+      return jsonResponse({
+        response: {
+          game_count: owned.length,
+          games: owned.map((appid) => ({ appid: Number(appid) })),
+        },
+      });
+    }
+
     if (url.hostname === "discord.com") {
       discordPayloads.push(JSON.parse(String(init?.body)) as DiscordWebhookPayload);
       if (discordStatus !== 200) {
@@ -80,6 +114,7 @@ function createHarness(options: HarnessOptions) {
     fetchImpl,
     discordPayloads,
     validated,
+    libraryRequests,
     run: () => runCheck(env, { fetch: fetchImpl, now: () => NOW }),
     setSearchStatus: (status: number) => {
       searchStatus = status;
@@ -89,6 +124,9 @@ function createHarness(options: HarnessOptions) {
     },
     setDiscordStatus: (status: number) => {
       discordStatus = status;
+    },
+    setLibraryStatus: (status: number) => {
+      libraryStatus = status;
     },
   };
 }
@@ -217,6 +255,111 @@ describe("runCheck", () => {
     const state = readState(harness.kv);
     expect(state["10"]?.free).toBe(false);
     expect(state["10"]?.notifiedAt).toBeUndefined();
+  });
+
+  it("mentions configured users who do not own the free game", async () => {
+    const harness = createHarness({
+      games: [{ appId: "10", name: "Alpha" }],
+      promotions: { "10": true },
+      mentionUsers: [
+        { discordId: DISCORD_ID_A, discordUsername: "alice", steamId: STEAM_ID_A },
+        { discordId: DISCORD_ID_B, discordUsername: "bob", steamId: STEAM_ID_B },
+      ],
+      steamApiKey: "test-key",
+      libraries: { [STEAM_ID_A]: ["10"], [STEAM_ID_B]: [] },
+    });
+
+    const result = await harness.run();
+
+    expect(result.notified).toEqual(["10"]);
+    expect(result.mentionFailures).toEqual([]);
+    expect([...harness.libraryRequests].sort()).toEqual([STEAM_ID_A, STEAM_ID_B].sort());
+    expect(harness.discordPayloads[0]).toMatchObject({
+      content: `<@${DISCORD_ID_B}>`,
+      allowed_mentions: { parse: [], users: [DISCORD_ID_B] },
+    });
+    expect(harness.discordPayloads[0]?.embeds).toHaveLength(1);
+  });
+
+  it("does not mention anyone when every configured user owns the game", async () => {
+    const harness = createHarness({
+      games: [{ appId: "10", name: "Alpha" }],
+      promotions: { "10": true },
+      mentionUsers: [
+        { discordId: DISCORD_ID_A, steamId: STEAM_ID_A },
+        { discordId: DISCORD_ID_B, steamId: STEAM_ID_B },
+      ],
+      steamApiKey: "test-key",
+      libraries: { [STEAM_ID_A]: ["10"], [STEAM_ID_B]: ["10", "20"] },
+    });
+
+    await harness.run();
+
+    expect(harness.discordPayloads).toHaveLength(1);
+    expect(harness.discordPayloads[0]?.content).toBeUndefined();
+    expect(harness.discordPayloads[0]?.allowed_mentions).toBeUndefined();
+  });
+
+  it("still posts when a Steam library cannot be read", async () => {
+    const harness = createHarness({
+      games: [{ appId: "10", name: "Alpha" }],
+      promotions: { "10": true },
+      mentionUsers: [
+        { discordId: DISCORD_ID_A, discordUsername: "alice", steamId: STEAM_ID_A },
+        { discordId: DISCORD_ID_B, discordUsername: "bob", steamId: STEAM_ID_B },
+      ],
+      steamApiKey: "test-key",
+      libraryStatus: 500,
+    });
+
+    const result = await harness.run();
+
+    expect(result.notified).toEqual(["10"]);
+    expect([...result.mentionFailures].sort()).toEqual(["alice", "bob"]);
+    expect(harness.discordPayloads[0]?.content).toBeUndefined();
+    expect(readState(harness.kv)["10"]?.notifiedAt).toBe(NOW);
+  });
+
+  it("skips mentions but still posts when STEAM_API_KEY is missing", async () => {
+    const harness = createHarness({
+      games: [{ appId: "10", name: "Alpha" }],
+      promotions: { "10": true },
+      mentionUsers: [
+        { discordId: DISCORD_ID_A, discordUsername: "alice", steamId: STEAM_ID_A },
+      ],
+    });
+
+    const result = await harness.run();
+
+    expect(result.notified).toEqual(["10"]);
+    expect(result.mentionFailures).toEqual(["alice"]);
+    expect(harness.libraryRequests).toEqual([]);
+    expect(harness.discordPayloads[0]?.content).toBeUndefined();
+  });
+
+  it("does not read libraries when no game is due", async () => {
+    const harness = createHarness({
+      games: [{ appId: "10", name: "Alpha" }],
+      promotions: { "10": true },
+      mentionUsers: [
+        { discordId: DISCORD_ID_A, discordUsername: "alice", steamId: STEAM_ID_A },
+      ],
+      steamApiKey: "test-key",
+      libraries: { [STEAM_ID_A]: [] },
+      kvRaw: JSON.stringify({
+        "10": {
+          firstSeenAt: NOW - DAY,
+          lastSeenAt: NOW - DAY,
+          free: true,
+          notifiedAt: NOW - DAY,
+        },
+      }),
+    });
+
+    const result = await harness.run();
+
+    expect(result.notified).toEqual([]);
+    expect(harness.libraryRequests).toEqual([]);
   });
 
   it("does not write state when the Steam search fails", async () => {

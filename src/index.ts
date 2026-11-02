@@ -1,10 +1,13 @@
 import { sendDiscordNotifications } from "./discord";
+import { formatMention, mentionLabel, parseMentionTargets } from "./mentions";
 import { fetchSteamFreeGames, isTemporarilyFree } from "./steam";
+import { fetchOwnedAppIds } from "./steam-library";
 import { getSeenGames, isNotificationDue, pruneSeenGames, saveSeenGames } from "./state";
-import type { Env, SeenGames, SteamGame } from "./types";
+import type { Env, MentionTarget, SeenGames, SteamGame } from "./types";
 import { errorMessage } from "./utils";
 
 const VALIDATION_CONCURRENCY = 4;
+const LIBRARY_CONCURRENCY = 2;
 
 export interface CheckDeps {
   fetch?: typeof fetch;
@@ -17,6 +20,8 @@ export interface CheckResult {
   notified: string[];
   notificationFailures: string[];
   validationFailures: string[];
+  /** Configured users whose library could not be read this run. */
+  mentionFailures: string[];
 }
 
 /**
@@ -82,6 +87,76 @@ async function mapWithConcurrency<T>(
   await Promise.all(runners);
 }
 
+interface MentionResolution {
+  mentionsByAppId: Map<string, string[]>;
+  mentionFailures: string[];
+}
+
+/**
+ * Work out who should be pinged for each game that is about to be announced.
+ *
+ * Each configured library is fetched at most once per run. A library that
+ * cannot be read is reported and left out of the mentions instead of being
+ * treated as empty, so a private profile or Steam outage does not ping
+ * everyone.
+ */
+async function resolveMentions(
+  env: Env,
+  games: readonly SteamGame[],
+  fetchImpl: typeof fetch,
+): Promise<MentionResolution> {
+  const resolution: MentionResolution = {
+    mentionsByAppId: new Map(),
+    mentionFailures: [],
+  };
+
+  if (games.length === 0) {
+    return resolution;
+  }
+
+  const targets = parseMentionTargets(env.MENTION_USERS);
+  if (targets.length === 0) {
+    return resolution;
+  }
+
+  const apiKey = env.STEAM_API_KEY;
+  if (!apiKey) {
+    console.warn("MENTION_USERS is configured but STEAM_API_KEY is missing; skipping mentions");
+    resolution.mentionFailures.push(...targets.map(mentionLabel));
+    return resolution;
+  }
+
+  const ownedByTarget = new Map<MentionTarget, Set<string>>();
+
+  await mapWithConcurrency(targets, LIBRARY_CONCURRENCY, async (target) => {
+    try {
+      const owned = await fetchOwnedAppIds(target.steamId, apiKey, fetchImpl);
+      ownedByTarget.set(target, owned);
+    } catch (cause) {
+      resolution.mentionFailures.push(mentionLabel(target));
+      console.warn(
+        `Could not read Steam library for ${mentionLabel(target)}: ${errorMessage(cause)}`,
+      );
+    }
+  });
+
+  for (const game of games) {
+    const mentions: string[] = [];
+    for (const target of targets) {
+      const owned = ownedByTarget.get(target);
+      if (owned !== undefined && !owned.has(game.appId)) {
+        mentions.push(formatMention(target));
+      }
+    }
+
+    if (mentions.length > 0) {
+      resolution.mentionsByAppId.set(game.appId, mentions);
+    }
+  }
+
+  return resolution;
+}
+
 /**
  * One scheduled check:
  *   1. Fetch current temporary free games from Steam.
@@ -112,11 +187,22 @@ export async function runCheck(env: Env, deps: CheckDeps = {}): Promise<CheckRes
 
   const candidates = games.filter((game) => isNotificationDue(seen[game.appId], now));
 
+  const { mentionsByAppId, mentionFailures } = await resolveMentions(
+    env,
+    candidates,
+    fetchImpl,
+  );
+
   let notified: string[] = [];
   let notificationFailures: string[] = [];
 
   if (candidates.length > 0) {
-    const result = await sendDiscordNotifications(env, candidates, fetchImpl);
+    const result = await sendDiscordNotifications(
+      env,
+      candidates,
+      fetchImpl,
+      mentionsByAppId,
+    );
     notified = result.sentAppIds;
     notificationFailures = result.failedAppIds;
 
@@ -136,6 +222,7 @@ export async function runCheck(env: Env, deps: CheckDeps = {}): Promise<CheckRes
     notified,
     notificationFailures,
     validationFailures,
+    mentionFailures,
   };
 
   console.log(
@@ -146,6 +233,7 @@ export async function runCheck(env: Env, deps: CheckDeps = {}): Promise<CheckRes
       notified: result.notified.length,
       notificationFailures: result.notificationFailures.length,
       validationFailures: result.validationFailures.length,
+      mentionFailures: result.mentionFailures.length,
     }),
   );
 

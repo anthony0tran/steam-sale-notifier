@@ -28,7 +28,6 @@ describe("formatEmbed", () => {
     expect(formatEmbed(games(1)[0] as SteamGame)).toEqual({
       title: "Game 1",
       url: "https://store.steampowered.com/app/1/",
-      description: "Now temporarily free on Steam.",
       color: 3_066_993,
     });
   });
@@ -55,7 +54,6 @@ describe("formatEmbed", () => {
     expect(formatEmbed(game)).toEqual({
       title: "Asleep: Act 1",
       url: "https://store.steampowered.com/app/1583850/",
-      description: "Now temporarily free on Steam.",
       color: 3_066_993,
       fields: [
         { name: "Platforms", value: "Windows · macOS · Linux", inline: true },
@@ -114,6 +112,39 @@ describe("buildDiscordPayloads", () => {
   it("returns no payloads for no games", () => {
     expect(buildDiscordPayloads([])).toEqual([]);
   });
+
+  it("aggregates and deduplicates mentions per message", () => {
+    const mentions = new Map<string, string[]>([
+      ["1", ["<@111111111111111111>", "<@222222222222222222>"]],
+      ["2", ["<@222222222222222222>"]],
+    ]);
+
+    const [payload] = buildDiscordPayloads(games(2), mentions);
+
+    expect(payload?.content).toBe(
+      "<@111111111111111111> <@222222222222222222>",
+    );
+    expect(payload?.allowed_mentions).toEqual({
+      parse: [],
+      users: ["111111111111111111", "222222222222222222"],
+    });
+  });
+
+  it("keeps username fallbacks but disables all pings", () => {
+    const mentions = new Map([["1", ["@alice"]]]);
+
+    const [payload] = buildDiscordPayloads(games(1), mentions);
+
+    expect(payload?.content).toBe("@alice");
+    expect(payload?.allowed_mentions).toEqual({ parse: [] });
+  });
+
+  it("does not add mention fields when nobody is mentioned", () => {
+    const [payload] = buildDiscordPayloads(games(1));
+
+    expect(payload?.content).toBeUndefined();
+    expect(payload?.allowed_mentions).toBeUndefined();
+  });
 });
 
 describe("sendDiscordNotifications", () => {
@@ -130,6 +161,23 @@ describe("sendDiscordNotifications", () => {
     expect(result).toEqual({ sentAppIds: ["1", "2"], failedAppIds: [] });
     expect(payloads).toHaveLength(1);
     expect((payloads[0] as { embeds: unknown[] }).embeds).toHaveLength(2);
+  });
+
+  it("posts mentions with the notification", async () => {
+    const payloads: Array<{ content?: string }> = [];
+    const fetchImpl = mockFetch((_url, init) => {
+      payloads.push(JSON.parse(String(init?.body)) as { content?: string });
+      return jsonResponse({ id: "1" });
+    });
+
+    await sendDiscordNotifications(
+      envWith(),
+      games(1),
+      fetchImpl,
+      new Map([["1", ["<@111111111111111111>"]]]),
+    );
+
+    expect(payloads[0]?.content).toBe("<@111111111111111111>");
   });
 
   it("retries after a rate-limit response", async () => {

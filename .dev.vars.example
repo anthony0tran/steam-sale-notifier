@@ -3,3 +3,10 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<id>/<token>
 
 # Optional: enables the token-protected manual check endpoint locally.
 # MANUAL_TRIGGER_TOKEN=local-dev-token-change-me
+
+# Optional: JSON array of users to ping when they do not own a free game.
+# A numeric Discord user id is required for a real ping.
+# MENTION_USERS=[{"discordId":"123456789012345678","discordUsername":"alice","steamId":"76561198000000000"}]
+
+# Optional: Steam Web API key used to read public game libraries.
+# STEAM_API_KEY=your-steam-web-api-key
