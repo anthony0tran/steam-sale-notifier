@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   SteamError,
   fetchSteamFreeGames,
+  getPromotionInfo,
   isTemporarilyFree,
   parseSteamSearchHtml,
 } from "../src/steam";
@@ -228,11 +229,31 @@ describe("isTemporarilyFree", () => {
     await expect(isTemporarilyFree("10", fetchImpl)).resolves.toBe(false);
   });
 
-  it("rejects dlc, soundtracks and other non-game app types", async () => {
+  it("accepts 100%-off DLC and reports its base game", async () => {
     const fetchImpl = mockFetch(() =>
-      details({ type: "dlc", price_overview: { discount_percent: 100, initial: 499, final: 499 } }),
+      details({
+        type: "dlc",
+        fullgame: { appid: "100", name: "Base Game" },
+        price_overview: { discount_percent: 100, initial: 499, final: 499 },
+      }),
     );
 
+    await expect(getPromotionInfo("10", fetchImpl)).resolves.toEqual({
+      free: true,
+      kind: "dlc",
+      baseAppId: "100",
+    });
+  });
+
+  it("rejects soundtracks and other non-game app types", async () => {
+    const fetchImpl = mockFetch(() =>
+      details({ type: "music", price_overview: { discount_percent: 100, initial: 499, final: 499 } }),
+    );
+
+    await expect(getPromotionInfo("10", fetchImpl)).resolves.toEqual({
+      free: false,
+      kind: "other",
+    });
     await expect(isTemporarilyFree("10", fetchImpl)).resolves.toBe(false);
   });
 

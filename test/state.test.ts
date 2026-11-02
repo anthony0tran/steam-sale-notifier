@@ -40,7 +40,14 @@ describe("parseSeenGames", () => {
 
   it("keeps known fields and ignores invalid entries", () => {
     const raw = JSON.stringify({
-      "10": { firstSeenAt: 1, lastSeenAt: 2, free: true, notifiedAt: 3 },
+      "10": {
+        firstSeenAt: 1,
+        lastSeenAt: 2,
+        free: true,
+        kind: "dlc",
+        baseAppId: "5",
+        notifiedAt: 3,
+      },
       "20": { lastSeenAt: 5 },
       bad: { lastSeenAt: 5 },
       "30": "nope",
@@ -49,7 +56,14 @@ describe("parseSeenGames", () => {
     const seen = parseSeenGames(raw, NOW);
 
     expect(seen).toEqual({
-      "10": { firstSeenAt: 1, lastSeenAt: 2, free: true, notifiedAt: 3 },
+      "10": {
+        firstSeenAt: 1,
+        lastSeenAt: 2,
+        free: true,
+        kind: "dlc",
+        baseAppId: "5",
+        notifiedAt: 3,
+      },
       "20": { firstSeenAt: NOW, lastSeenAt: 5 },
     });
   });

@@ -27,6 +27,11 @@ interface HarnessOptions {
   /** SteamID64 -> app ids owned by that account. Missing ids look private. */
   libraries?: Record<string, string[]>;
   libraryStatus?: number;
+  /** Per-app appdetails overrides, used for DLC/base-game tests. */
+  appDetails?: Record<
+    string,
+    { type?: string; free?: boolean; baseAppId?: string }
+  >;
 }
 
 function createHarness(options: HarnessOptions) {
@@ -67,14 +72,21 @@ function createHarness(options: HarnessOptions) {
         return new Response("details failed", { status: validationStatus });
       }
 
-      const free = promotions[appId] === true;
+      const fixture = options.appDetails?.[appId];
+      const free = fixture?.free ?? promotions[appId] === true;
+      const type = fixture?.type ?? "game";
+      const data: Record<string, unknown> = {
+        type,
+        price_overview: free
+          ? { discount_percent: 100, initial: 999, final: 999 }
+          : { discount_percent: 50, initial: 1999, final: 999 },
+      };
+      if (fixture?.baseAppId) {
+        data.fullgame = { appid: fixture.baseAppId, name: "Base Game" };
+      }
+
       return jsonResponse({
-        [appId]: {
-          success: true,
-          data: free
-            ? { type: "game", price_overview: { discount_percent: 100, initial: 999, final: 999 } }
-            : { type: "game", price_overview: { discount_percent: 50, initial: 1999, final: 999 } },
-        },
+        [appId]: { success: true, data },
       });
     }
 
@@ -184,6 +196,7 @@ describe("runCheck", () => {
           firstSeenAt: NOW - 60 * DAY,
           lastSeenAt: NOW - DAY,
           free: true,
+          kind: "game",
           notifiedAt: NOW - 31 * DAY,
         },
       }),
@@ -208,6 +221,7 @@ describe("runCheck", () => {
           firstSeenAt: NOW - 60 * DAY,
           lastSeenAt: NOW - DAY,
           free: true,
+          kind: "game",
           notifiedAt,
         },
       }),
@@ -351,6 +365,7 @@ describe("runCheck", () => {
           firstSeenAt: NOW - DAY,
           lastSeenAt: NOW - DAY,
           free: true,
+          kind: "game",
           notifiedAt: NOW - DAY,
         },
       }),
@@ -360,6 +375,78 @@ describe("runCheck", () => {
 
     expect(result.notified).toEqual([]);
     expect(harness.libraryRequests).toEqual([]);
+  });
+
+  it("posts a 100%-off DLC and mentions users who own the base game", async () => {
+    const harness = createHarness({
+      games: [{ appId: "30", name: "Expansion DLC" }],
+      appDetails: { "30": { type: "dlc", free: true, baseAppId: "10" } },
+      mentionUsers: [
+        { discordId: DISCORD_ID_A, discordUsername: "alice", steamId: STEAM_ID_A },
+        { discordId: DISCORD_ID_B, discordUsername: "bob", steamId: STEAM_ID_B },
+      ],
+      steamApiKey: "test-key",
+      libraries: {
+        [STEAM_ID_A]: ["10", "99"],
+        [STEAM_ID_B]: ["99"],
+      },
+    });
+
+    const result = await harness.run();
+
+    expect(result.notified).toEqual(["30"]);
+    expect(result.mentionFailures).toEqual([]);
+    expect(harness.discordPayloads).toHaveLength(1);
+    expect(harness.discordPayloads[0]).toMatchObject({
+      content: `<@${DISCORD_ID_A}>`,
+      allowed_mentions: { parse: [], users: [DISCORD_ID_A] },
+    });
+    expect(harness.discordPayloads[0]?.embeds).toHaveLength(1);
+
+    const state = readState(harness.kv)["30"];
+    expect(state?.free).toBe(true);
+    expect(state?.kind).toBe("dlc");
+    expect(state?.baseAppId).toBe("10");
+    expect(state?.notifiedAt).toBe(NOW);
+  });
+
+  it("does not post a 100%-off DLC when nobody owns the base game", async () => {
+    const harness = createHarness({
+      games: [{ appId: "30", name: "Expansion DLC" }],
+      appDetails: { "30": { type: "dlc", free: true, baseAppId: "10" } },
+      mentionUsers: [
+        { discordId: DISCORD_ID_A, discordUsername: "alice", steamId: STEAM_ID_A },
+        { discordId: DISCORD_ID_B, discordUsername: "bob", steamId: STEAM_ID_B },
+      ],
+      steamApiKey: "test-key",
+      libraries: {
+        [STEAM_ID_A]: ["99"],
+        [STEAM_ID_B]: [],
+      },
+    });
+
+    const result = await harness.run();
+
+    expect(result.notified).toEqual([]);
+    expect(harness.discordPayloads).toHaveLength(0);
+
+    const state = readState(harness.kv)["30"];
+    expect(state?.free).toBe(true);
+    expect(state?.kind).toBe("dlc");
+    expect(state?.baseAppId).toBe("10");
+    expect(state?.notifiedAt).toBeUndefined();
+  });
+
+  it("does not post a 100%-off DLC without configured libraries", async () => {
+    const harness = createHarness({
+      games: [{ appId: "30", name: "Expansion DLC" }],
+      appDetails: { "30": { type: "dlc", free: true, baseAppId: "10" } },
+    });
+
+    const result = await harness.run();
+
+    expect(result.notified).toEqual([]);
+    expect(harness.discordPayloads).toHaveLength(0);
   });
 
   it("does not write state when the Steam search fails", async () => {

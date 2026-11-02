@@ -1,9 +1,15 @@
 import { sendDiscordNotifications } from "./discord";
 import { formatMention, mentionLabel, parseMentionTargets } from "./mentions";
-import { fetchSteamFreeGames, isTemporarilyFree } from "./steam";
+import { fetchSteamFreeGames, getPromotionInfo } from "./steam";
 import { fetchOwnedAppIds } from "./steam-library";
 import { getSeenGames, isNotificationDue, pruneSeenGames, saveSeenGames } from "./state";
-import type { Env, MentionTarget, SeenGames, SteamGame } from "./types";
+import type {
+  Env,
+  MentionTarget,
+  PromotionInfo,
+  SeenGames,
+  SteamGame,
+} from "./types";
 import { errorMessage } from "./utils";
 
 const VALIDATION_CONCURRENCY = 4;
@@ -37,23 +43,35 @@ async function resolvePromotions(
 ): Promise<{ validationFailures: string[] }> {
   const unresolved = games.filter((game) => {
     const entry = seen[game.appId];
-    return entry === undefined || entry.free === undefined;
+    // Entries without `kind` predate DLC support; re-validate them once so
+    // previously skipped DLCs (and their base game ids) are picked up.
+    return entry === undefined || entry.free === undefined || entry.kind === undefined;
   });
 
   const validationFailures: string[] = [];
 
   await mapWithConcurrency(unresolved, VALIDATION_CONCURRENCY, async (game) => {
-    let free: boolean | undefined;
+    let info: PromotionInfo | undefined;
     try {
-      free = await isTemporarilyFree(game.appId, fetchImpl);
+      info = await getPromotionInfo(game.appId, fetchImpl);
     } catch (cause) {
       validationFailures.push(game.appId);
       console.warn(`Could not validate Steam app ${game.appId}: ${errorMessage(cause)}`);
     }
 
     const entry = seen[game.appId] ?? { firstSeenAt: now, lastSeenAt: now };
-    if (free !== undefined) {
-      entry.free = free;
+    if (info !== undefined) {
+      entry.free = info.free;
+      if (info.kind) {
+        entry.kind = info.kind;
+      } else {
+        delete entry.kind;
+      }
+      if (info.baseAppId) {
+        entry.baseAppId = info.baseAppId;
+      } else {
+        delete entry.baseAppId;
+      }
     }
     entry.lastSeenAt = now;
     seen[game.appId] = entry;
@@ -88,24 +106,35 @@ async function mapWithConcurrency<T>(
 }
 
 interface MentionResolution {
+  /** Candidates that should actually be posted. */
+  games: SteamGame[];
   mentionsByAppId: Map<string, string[]>;
   mentionFailures: string[];
 }
 
 /**
- * Work out who should be pinged for each game that is about to be announced.
+ * Decide which candidates to post and who should be pinged.
+ *
+ * Regular games are always posted. Users who do not own the game are mentioned.
+ *
+ * DLC is only posted when at least one configured user owns its base game,
+ * because the DLC is useless to everyone else. DLC ownership itself is not
+ * exposed by Steam's owned-games endpoint, so the base game is the usable
+ * signal. The confirmed base-game owners are mentioned.
  *
  * Each configured library is fetched at most once per run. A library that
- * cannot be read is reported and left out of the mentions instead of being
+ * cannot be read is reported and left out of the decision instead of being
  * treated as empty, so a private profile or Steam outage does not ping
- * everyone.
+ * everyone or suppress a game.
  */
 async function resolveMentions(
   env: Env,
   games: readonly SteamGame[],
+  seen: SeenGames,
   fetchImpl: typeof fetch,
 ): Promise<MentionResolution> {
   const resolution: MentionResolution = {
+    games: [],
     mentionsByAppId: new Map(),
     mentionFailures: [],
   };
@@ -115,32 +144,60 @@ async function resolveMentions(
   }
 
   const targets = parseMentionTargets(env.MENTION_USERS);
-  if (targets.length === 0) {
-    return resolution;
-  }
-
-  const apiKey = env.STEAM_API_KEY;
-  if (!apiKey) {
-    console.warn("MENTION_USERS is configured but STEAM_API_KEY is missing; skipping mentions");
-    resolution.mentionFailures.push(...targets.map(mentionLabel));
-    return resolution;
-  }
-
   const ownedByTarget = new Map<MentionTarget, Set<string>>();
 
-  await mapWithConcurrency(targets, LIBRARY_CONCURRENCY, async (target) => {
-    try {
-      const owned = await fetchOwnedAppIds(target.steamId, apiKey, fetchImpl);
-      ownedByTarget.set(target, owned);
-    } catch (cause) {
-      resolution.mentionFailures.push(mentionLabel(target));
+  if (targets.length > 0) {
+    const apiKey = env.STEAM_API_KEY;
+    if (!apiKey) {
       console.warn(
-        `Could not read Steam library for ${mentionLabel(target)}: ${errorMessage(cause)}`,
+        "MENTION_USERS is configured but STEAM_API_KEY is missing; DLCs will be skipped and games posted without mentions",
       );
+      resolution.mentionFailures.push(...targets.map(mentionLabel));
+    } else {
+      await mapWithConcurrency(targets, LIBRARY_CONCURRENCY, async (target) => {
+        try {
+          const owned = await fetchOwnedAppIds(target.steamId, apiKey, fetchImpl);
+          ownedByTarget.set(target, owned);
+        } catch (cause) {
+          resolution.mentionFailures.push(mentionLabel(target));
+          console.warn(
+            `Could not read Steam library for ${mentionLabel(target)}: ${errorMessage(cause)}`,
+          );
+        }
+      });
     }
-  });
+  }
 
   for (const game of games) {
+    const entry = seen[game.appId];
+    const kind = entry?.kind ?? "game";
+
+    if (kind === "dlc") {
+      const baseAppId = entry?.baseAppId;
+      if (!baseAppId) {
+        console.warn(
+          `Skipping Steam DLC ${game.appId}: Steam did not report a base game`,
+        );
+        continue;
+      }
+
+      // Only mention users whose readable library contains the base game. No
+      // confirmed owner means nobody can use the DLC, so no message is posted.
+      const mentions = targets
+        .filter((target) => ownedByTarget.get(target)?.has(baseAppId))
+        .map(formatMention);
+
+      if (mentions.length === 0) {
+        continue;
+      }
+
+      resolution.games.push(game);
+      resolution.mentionsByAppId.set(game.appId, mentions);
+      continue;
+    }
+
+    resolution.games.push(game);
+
     const mentions: string[] = [];
     for (const target of targets) {
       const owned = ownedByTarget.get(target);
@@ -162,7 +219,8 @@ async function resolveMentions(
  *   1. Fetch current temporary free games from Steam.
  *   2. Validate candidates we have not priced yet.
  *   3. Notify validated games that were never announced, or whose 30-day
- *      cooldown has expired.
+ *      cooldown has expired. DLC is only announced when a configured user owns
+ *      its base game.
  *   4. Mark successful notifications and persist pruned state.
  *
  * A Steam or KV failure throws before anything is saved, so the run can be
@@ -187,19 +245,16 @@ export async function runCheck(env: Env, deps: CheckDeps = {}): Promise<CheckRes
 
   const candidates = games.filter((game) => isNotificationDue(seen[game.appId], now));
 
-  const { mentionsByAppId, mentionFailures } = await resolveMentions(
-    env,
-    candidates,
-    fetchImpl,
-  );
+  const { games: notifiableGames, mentionsByAppId, mentionFailures } =
+    await resolveMentions(env, candidates, seen, fetchImpl);
 
   let notified: string[] = [];
   let notificationFailures: string[] = [];
 
-  if (candidates.length > 0) {
+  if (notifiableGames.length > 0) {
     const result = await sendDiscordNotifications(
       env,
-      candidates,
+      notifiableGames,
       fetchImpl,
       mentionsByAppId,
     );

@@ -92,7 +92,7 @@ Pushes to `main` deploy automatically once the Cloudflare secrets are set up
 | Command | Purpose |
 |---|---|
 | `npm run dev` | Local Worker with `--test-scheduled` |
-| `npm test` | Vitest unit tests (91 tests) |
+| `npm test` | Vitest unit tests (95 tests) |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run deploy` | Deploy with Wrangler |
 | `npm run tail` | Stream production logs |
@@ -106,10 +106,14 @@ Pushes to `main` deploy automatically once the Cloudflare secrets are set up
    release date, price/discount and review summary when present. Bundle rows
    and rows without a title are skipped.
 3. **Validate** — only *new or unresolved* candidates are sent to
-   `appdetails?filters=basic,price_overview&cc=nl`. A game qualifies when:
+   `appdetails?filters=basic,price_overview&cc=nl`. A promotion qualifies when:
    - `discount_percent === 100`, and
-   - `initial > 0` (a paid game), and
-   - `type` is absent or `"game"` (excludes DLC, soundtracks, demos, software).
+   - `initial > 0` (a paid app), and
+   - `type` is absent, `"game"`, or `"dlc"` (soundtracks, demos, software and
+     other app types are excluded).
+
+   For DLC, Steam's `fullgame.appid` is stored as the base game id. The app kind
+   and base game id are cached in KV so later runs do not need to ask again.
 
    Steam's appdetails quirk: for 100%-off promos, `final` often stays equal to
    the original price (`{"discount_percent":100,"initial":975,"final":975}`,
@@ -120,14 +124,20 @@ Pushes to `main` deploy automatically once the Cloudflare secrets are set up
 
    ```json
    {
-     "570": { "firstSeenAt": 1793530000000, "lastSeenAt": 1793530000000, "free": true, "notifiedAt": 1793530000000 }
+     "570": { "firstSeenAt": 1793530000000, "lastSeenAt": 1793530000000, "free": true, "kind": "game", "notifiedAt": 1793530000000 },
+     "2138330": { "firstSeenAt": 1793530000000, "lastSeenAt": 1793530000000, "free": true, "kind": "dlc", "baseAppId": "1091500" }
    }
    ```
 
-5. **Notify** — games that are free and either have no successful notification
+5. **Notify** — apps that are free and either have no successful notification
    or were last announced at least **30 days** ago are posted in batches of up
    to 10 embeds (Discord's limit). A game is marked notified only after Discord
    accepts the message, so failed posts are retried next run.
+
+   DLC is only posted when at least one configured user owns its base game. If
+   no readable library contains the base game, the DLC is skipped without being
+   marked notified, so it can be announced later if someone buys the base game
+   during the promotion.
 
 ### State retention and cooldown
 
@@ -159,12 +169,13 @@ requests are made:
 - review summary with 👍/🤔/👎, percentage and review count when Steam exposes it
 
 The separate `appdetails` call is still used only to confirm the app is a
-100%-off game and to exclude DLC, software and soundtracks.
+100%-off game or DLC and to exclude soundtracks, software and other non-game
+types.
 
-## Mentions for people who don't own the game
+## Mentions and DLC gating
 
-Optional. When a validated free game is about to be posted, the Worker can read
-each configured user's Steam library and ping the people who do not own it yet.
+Optional. When a validated free app is about to be posted, the Worker can read
+each configured user's Steam library and use that for mentions.
 
 ### 1. Configure the users
 
@@ -211,14 +222,21 @@ logged, and the game notification is still sent.
 
 ### Behavior
 
-- Libraries are fetched at most once per check, and only when at least one game
+- Libraries are fetched at most once per check, and only when at least one app
   is about to be announced.
-- Users who already own the app are not mentioned.
+- **Games:** users who already own the game are not mentioned. The game is
+  posted even when nobody is mentioned.
+- **DLC:** Steam's owned-games response exposes the base game, not DLC
+  ownership. The Worker therefore checks who owns the DLC's base game. If no
+  readable library contains it, the DLC is not posted at all. If at least one
+  user owns it, the DLC is posted and those confirmed owners are mentioned.
 - Mentions are deduplicated per Discord message; a single content line prefixes
   each batch of up to 10 embeds.
 - Failed library lookups appear in `mentionFailures` in the logs and the manual
   `/check` response.
-- `MENTION_USERS` has no effect without `STEAM_API_KEY`.
+- Without `MENTION_USERS`/`STEAM_API_KEY`, regular games are still posted
+  (without mentions) but DLCs are skipped because base-game ownership cannot be
+  confirmed.
 
 ## Manual trigger
 
@@ -246,10 +264,13 @@ already-notified games are skipped.
   metadata extraction (image, platforms, release date, price, reviews)
 - Discord payloads: batching, title truncation, strikethrough pricing, review
   tone, mention aggregation, 429 retry and partial batch failure
-- 100%-off validation, including Steam's `final` quirk and non-game app types
+- 100%-off validation, including Steam's `final` quirk, DLC base-game
+  metadata and non-game app types
 - Steam library ownership lookups: SteamID64/profile URL parsing, vanity
   resolution, private libraries and API failures
 - `MENTION_USERS` parsing, mention formatting and safe fallback behavior
+- DLC gating: post only when a configured user owns the base game, skip
+  otherwise, and never mark skipped DLCs as notified
 - KV persistence, legacy migration, corrupt state, 90-day pruning and the
   30-day notification cooldown
 - End-to-end `runCheck`: empty state, dedupe on the second run, Discord retry,

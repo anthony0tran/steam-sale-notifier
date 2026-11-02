@@ -43,6 +43,17 @@ export interface GameReview {
   tone?: "positive" | "mixed" | "negative";
 }
 
+/** App types tracked by the worker. Only games and DLC can be announced. */
+export type SteamAppKind = "game" | "dlc" | "other";
+
+export interface PromotionInfo {
+  /** Whether the app currently has a paid 100%-off promotion. */
+  free: boolean;
+  kind?: SteamAppKind;
+  /** For DLC, the app id of the base game it belongs to. */
+  baseAppId?: string;
+}
+
 export interface SteamGame {
   appId: string;
   name: string;
@@ -63,6 +74,10 @@ export interface SeenGame {
   firstSeenAt: number;
   lastSeenAt: number;
   free?: boolean;
+  /** App kind recorded when the promotion was validated. */
+  kind?: SteamAppKind;
+  /** For DLC, the base game app id recorded at validation time. */
+  baseAppId?: string;
   notifiedAt?: number;
 }
 

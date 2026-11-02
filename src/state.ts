@@ -59,6 +59,12 @@ export function parseSeenGames(raw: string | null, now: number = Date.now()): Se
     if (typeof value.free === "boolean") {
       entry.free = value.free;
     }
+    if (value.kind === "game" || value.kind === "dlc" || value.kind === "other") {
+      entry.kind = value.kind;
+    }
+    if (typeof value.baseAppId === "string" && isAppId(value.baseAppId)) {
+      entry.baseAppId = value.baseAppId;
+    }
     if (typeof value.notifiedAt === "number") {
       entry.notifiedAt = value.notifiedAt;
     }

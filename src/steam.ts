@@ -1,4 +1,10 @@
-import type { GamePrice, GameReview, SteamGame } from "./types";
+import type {
+  GamePrice,
+  GameReview,
+  PromotionInfo,
+  SteamAppKind,
+  SteamGame,
+} from "./types";
 import { errorMessage } from "./utils";
 
 const SEARCH_ENDPOINT = "https://store.steampowered.com/search/";
@@ -60,6 +66,10 @@ interface PriceOverview {
 interface AppDetailsData {
   type?: string;
   price_overview?: PriceOverview;
+  fullgame?: {
+    appid?: string | number;
+    name?: string;
+  };
 }
 
 interface AppDetailsEntry {
@@ -355,7 +365,7 @@ export async function fetchSteamFreeGames(fetchImpl: typeof fetch = fetch): Prom
 }
 
 /**
- * Ask Steam whether an app is currently a temporarily free game.
+ * Ask Steam about an app's current promotion.
  *
  * Permanently free-to-play titles have no `price_overview` (or a 0% discount),
  * so requiring `discount_percent === 100` filters them out. Note that Steam
@@ -363,15 +373,17 @@ export async function fetchSteamFreeGames(fetchImpl: typeof fetch = fetch): Prom
  * `{ discount_percent: 100, initial: 975, final: 975 }` with
  * `final_formatted: "Free"`), so `final === 0` is *not* a usable check.
  * Requiring a non-zero `initial` excludes free-to-own apps with no base price.
- * DLC, soundtracks, demos and software are skipped so the channel only gets
- * actual games.
+ *
+ * Games and DLC are returned; their ownership handling differs. DLC also
+ * carries the base game's app id from `fullgame`. Music, demos, software and
+ * other app types are reported as not free.
  *
  * Network/server failures throw; the caller retries on a later run.
  */
-export async function isTemporarilyFree(
+export async function getPromotionInfo(
   appId: string,
   fetchImpl: typeof fetch = fetch,
-): Promise<boolean> {
+): Promise<PromotionInfo> {
   const url = new URL(APPDETAILS_ENDPOINT);
   url.searchParams.set("appids", appId);
   url.searchParams.set("cc", "nl");
@@ -405,27 +417,59 @@ export async function isTemporarilyFree(
   const entry = payload[appId];
   if (entry?.success !== true) {
     // Steam says the app is unavailable; treat it as not a promotion.
-    return false;
+    return { free: false };
   }
 
   const data = entry.data;
   if (!data || Array.isArray(data)) {
-    return false;
+    return { free: false };
   }
 
   const details = data as AppDetailsData;
-  // "game" is the only type we announce; skip "dlc", "music", "demo", etc.
-  // If Steam ever omits the field, fall back to the price check alone.
-  if (details.type !== undefined && details.type !== "game") {
-    return false;
+  // "game" and "dlc" are the only kinds we announce. If Steam ever omits the
+  // type, fall back to treating the app as a game. Other types are recorded so
+  // they are not re-validated on every run.
+  const kind: SteamAppKind =
+    details.type === undefined || details.type === "game"
+      ? "game"
+      : details.type === "dlc"
+        ? "dlc"
+        : "other";
+
+  const info: PromotionInfo = {
+    free: false,
+    kind,
+  };
+
+  if (kind === "other") {
+    return info;
+  }
+
+  const baseAppId =
+    details.fullgame?.appid !== undefined
+      ? String(details.fullgame.appid)
+      : undefined;
+
+  if (baseAppId) {
+    info.baseAppId = baseAppId;
   }
 
   const price = details.price_overview;
   if (!price) {
-    return false;
+    return info;
   }
 
   const discountPercent = price.discount_percent ?? 0;
   const initial = price.initial ?? 0;
-  return discountPercent === 100 && initial > 0;
+  info.free = discountPercent === 100 && initial > 0;
+  return info;
+}
+
+/** Backwards-compatible boolean wrapper around {@link getPromotionInfo}. */
+export async function isTemporarilyFree(
+  appId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<boolean> {
+  const info = await getPromotionInfo(appId, fetchImpl);
+  return info.free;
 }
