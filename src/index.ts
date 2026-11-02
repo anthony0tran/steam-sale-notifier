@@ -1,6 +1,6 @@
 import { sendDiscordNotifications } from "./discord";
 import { formatMention, mentionLabel, parseMentionTargets } from "./mentions";
-import { fetchSteamFreeGames, getPromotionInfo } from "./steam";
+import { fetchSteamFreeGames, fetchSteamGamesFromSearchUrl, getPromotionInfo } from "./steam";
 import { fetchOwnedAppIds } from "./steam-library";
 import { getSeenGames, isNotificationDue, pruneSeenGames, saveSeenGames } from "./state";
 import type {
@@ -14,6 +14,11 @@ import { errorMessage } from "./utils";
 
 const VALIDATION_CONCURRENCY = 4;
 const LIBRARY_CONCURRENCY = 2;
+
+/** Search used by the test endpoint: current specials, not only free games. */
+export const TEST_SEARCH_URL =
+  "https://store.steampowered.com/search/?hwtype=0&supportedlang=english&specials=1&ndl=1";
+const TEST_GAME_LIMIT = 3;
 
 export interface CheckDeps {
   fetch?: typeof fetch;
@@ -295,6 +300,76 @@ export async function runCheck(env: Env, deps: CheckDeps = {}): Promise<CheckRes
   return result;
 }
 
+export interface TestNotificationResult {
+  gamesFound: number;
+  games: Array<{ appId: string; name: string; url: string }>;
+  notified: string[];
+  notificationFailures: string[];
+  mentionFailures: string[];
+}
+
+/**
+ * Send a notification for the first few games of {@link TEST_SEARCH_URL}.
+ *
+ * This deliberately bypasses KV state and 100%-off validation so a caller can
+ * always trigger a Discord message. Configured mentions are still applied; all
+ * test entries are treated as games so DLC base-game gating cannot suppress the
+ * message.
+ */
+export async function runTestNotification(
+  env: Env,
+  deps: CheckDeps = {},
+): Promise<TestNotificationResult> {
+  const fetchImpl = deps.fetch ?? fetch;
+  const now = deps.now?.() ?? Date.now();
+
+  const games = await fetchSteamGamesFromSearchUrl(TEST_SEARCH_URL, fetchImpl);
+  const selected = games.slice(0, TEST_GAME_LIMIT);
+
+  const seen: SeenGames = {};
+  for (const game of selected) {
+    seen[game.appId] = {
+      firstSeenAt: now,
+      lastSeenAt: now,
+      free: true,
+      kind: "game",
+    };
+  }
+
+  const { games: notifiable, mentionsByAppId, mentionFailures } = await resolveMentions(
+    env,
+    selected,
+    seen,
+    fetchImpl,
+  );
+
+  const result = await sendDiscordNotifications(
+    env,
+    notifiable,
+    fetchImpl,
+    mentionsByAppId,
+  );
+
+  console.log(
+    "Steam test notification complete",
+    JSON.stringify({
+      gamesFound: games.length,
+      selected: selected.length,
+      notified: result.sentAppIds.length,
+      notificationFailures: result.failedAppIds.length,
+      mentionFailures: mentionFailures.length,
+    }),
+  );
+
+  return {
+    gamesFound: games.length,
+    games: selected.map(({ appId, name, url }) => ({ appId, name, url })),
+    notified: result.sentAppIds,
+    notificationFailures: result.failedAppIds,
+    mentionFailures,
+  };
+}
+
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -303,7 +378,7 @@ export default {
       return jsonResponse({ ok: true, service: "steam-sale-notifier" });
     }
 
-    if (url.pathname !== "/check") {
+    if (url.pathname !== "/check" && url.pathname !== "/test") {
       return jsonResponse({ ok: false, error: "not found" }, 404);
     }
 
@@ -325,6 +400,16 @@ export default {
       return jsonResponse({ ok: false, error: "unauthorized" }, 401, {
         "www-authenticate": "Bearer",
       });
+    }
+
+    if (url.pathname === "/test") {
+      try {
+        const result = await runTestNotification(env);
+        return jsonResponse({ ok: true, ...result });
+      } catch (cause) {
+        console.error("Manual Steam test notification failed", errorMessage(cause));
+        return jsonResponse({ ok: false, error: errorMessage(cause) }, 500);
+      }
     }
 
     try {

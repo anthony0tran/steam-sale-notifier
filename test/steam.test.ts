@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   SteamError,
   fetchSteamFreeGames,
+  fetchSteamGamesFromSearchUrl,
   getPromotionInfo,
   isTemporarilyFree,
   parseSteamSearchHtml,
@@ -199,6 +200,46 @@ describe("fetchSteamFreeGames", () => {
     expect(url.searchParams.get("l")).toBe("english");
     expect(url.searchParams.get("maxprice")).toBe("free");
     expect(url.searchParams.get("specials")).toBe("1");
+  });
+});
+
+describe("fetchSteamGamesFromSearchUrl", () => {
+  const searchUrl =
+    "https://store.steampowered.com/search/?hwtype=0&supportedlang=english&specials=1&ndl=1";
+
+  it("fetches and parses an arbitrary search url", async () => {
+    let requestedUrl = "";
+    const fetchImpl = mockFetch((url) => {
+      requestedUrl = url;
+      return htmlResponse(searchRows([
+        { appId: "10", name: "Alpha" },
+        { appId: "20", name: "Beta" },
+      ]));
+    });
+
+    const games = await fetchSteamGamesFromSearchUrl(searchUrl, fetchImpl);
+
+    expect(games.map((game) => game.appId)).toEqual(["10", "20"]);
+    expect(requestedUrl).toBe(searchUrl);
+  });
+
+  it("propagates Steam request failures", async () => {
+    const fetchImpl = mockFetch(() => new Response("unavailable", { status: 503 }));
+
+    await expect(
+      fetchSteamGamesFromSearchUrl(searchUrl, fetchImpl),
+    ).rejects.toMatchObject({
+      name: "SteamError",
+      status: 503,
+    });
+  });
+
+  it("throws when the page has no parsable rows", async () => {
+    const fetchImpl = mockFetch(() => htmlResponse("<html><body>Access denied</body></html>"));
+
+    await expect(
+      fetchSteamGamesFromSearchUrl(searchUrl, fetchImpl),
+    ).rejects.toBeInstanceOf(SteamError);
   });
 });
 

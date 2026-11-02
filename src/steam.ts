@@ -365,6 +365,22 @@ export async function fetchSteamFreeGames(fetchImpl: typeof fetch = fetch): Prom
 }
 
 /**
+ * Fetch and parse one arbitrary Steam search results page. Used by the test
+ * endpoint so it can reuse the normal parser against a non-free search.
+ */
+export async function fetchSteamGamesFromSearchUrl(
+  searchUrl: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<SteamGame[]> {
+  const html = await fetchHtml(searchUrl, fetchImpl);
+  const games = parseSteamSearchHtml(html);
+  if (games.length === 0) {
+    throw new SteamError("Steam search returned no parsable game rows (markup may have changed)");
+  }
+  return games;
+}
+
+/**
  * Ask Steam about an app's current promotion.
  *
  * Permanently free-to-play titles have no `price_overview` (or a 0% discount),

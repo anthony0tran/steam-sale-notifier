@@ -92,7 +92,7 @@ Pushes to `main` deploy automatically once the Cloudflare secrets are set up
 | Command | Purpose |
 |---|---|
 | `npm run dev` | Local Worker with `--test-scheduled` |
-| `npm test` | Vitest unit tests (95 tests) |
+| `npm test` | Vitest unit tests (102 tests) |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run deploy` | Deploy with Wrangler |
 | `npm run tail` | Stream production logs |
@@ -256,6 +256,28 @@ working. The endpoint writes real KV state and posts to Discord, so avoid
 calling it concurrently with another run; sequential calls are safe because
 already-notified games are skipped.
 
+## Test notifications
+
+`GET`/`POST /test` always sends a Discord message with the first **3** results
+from:
+
+```
+https://store.steampowered.com/search/?hwtype=0&supportedlang=english&specials=1&ndl=1
+```
+
+This is for checking the webhook, embeds and mentions without waiting for a
+100%-off promotion. It bypasses KV state and 100%-off validation, so repeated
+calls keep posting. Configured mentions are still applied, and every test result
+is treated as a game so DLC base-game gating cannot suppress the message.
+
+```bash
+curl -H "Authorization: Bearer $MANUAL_TRIGGER_TOKEN" \
+  https://steam-sale-notifier.<subdomain>.workers.dev/test
+```
+
+It uses the same `MANUAL_TRIGGER_TOKEN` as `/check`. The JSON response lists the
+selected games plus `notified`, `notificationFailures` and `mentionFailures`.
+
 ## Tests
 
 `npm test` covers:
@@ -277,6 +299,8 @@ already-notified games are skipped.
   validation retry, Steam failure (no KV write)
 - HTTP handling: health response, bearer-token auth, 401/503/405 paths, manual
   trigger summary, and the `scheduled` handler
+- Test endpoint: fixed specials URL, first-three selection, KV/validation
+  bypass, mention application and token protection
 
 CI runs the same typecheck, test and build steps on every push and pull request.
 

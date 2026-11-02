@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import worker, { runCheck } from "../src/index";
+import worker, { TEST_SEARCH_URL, runCheck } from "../src/index";
 import { SEEN_GAMES_KEY, parseSeenGames } from "../src/state";
 import { SteamError } from "../src/steam";
 import type { DiscordWebhookPayload, Env } from "../src/types";
@@ -49,6 +49,7 @@ function createHarness(options: HarnessOptions) {
   const discordPayloads: DiscordWebhookPayload[] = [];
   const validated: string[] = [];
   const libraryRequests: string[] = [];
+  const searchRequests: string[] = [];
 
   let searchStatus = options.searchStatus ?? 200;
   let validationStatus = options.validationStatus ?? 200;
@@ -59,6 +60,7 @@ function createHarness(options: HarnessOptions) {
     const url = new URL(rawUrl);
 
     if (url.hostname === "store.steampowered.com" && url.pathname === "/search/") {
+      searchRequests.push(rawUrl);
       if (searchStatus !== 200) {
         return new Response("search failed", { status: searchStatus });
       }
@@ -127,6 +129,7 @@ function createHarness(options: HarnessOptions) {
     discordPayloads,
     validated,
     libraryRequests,
+    searchRequests,
     run: () => runCheck(env, { fetch: fetchImpl, now: () => NOW }),
     setSearchStatus: (status: number) => {
       searchStatus = status;
@@ -675,5 +678,138 @@ describe("manual check endpoint", () => {
     expect(notFound.status).toBe(404);
     expect(notAllowed.status).toBe(405);
     expect(notAllowed.headers.get("allow")).toBe("GET, POST");
+  });
+});
+
+describe("test notification endpoint", () => {
+  const callWorker = async (
+    harness: ReturnType<typeof createHarness>,
+    path: string,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    vi.stubGlobal("fetch", harness.fetchImpl);
+    try {
+      return await worker.fetch(
+        new Request(`https://worker.example${path}`, init),
+        harness.env,
+        {} as unknown as ExecutionContext,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  };
+
+  it("posts the first three games from the test search", async () => {
+    const harness = createHarness({
+      games: [
+        { appId: "1", name: "One" },
+        { appId: "2", name: "Two" },
+        { appId: "3", name: "Three" },
+        { appId: "4", name: "Four" },
+      ],
+      triggerToken: "secret",
+    });
+
+    const response = await callWorker(harness, "/test", {
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      gamesFound: number;
+      games: Array<{ appId: string }>;
+      notified: string[];
+    };
+    expect(body).toMatchObject({
+      ok: true,
+      gamesFound: 4,
+      notified: ["1", "2", "3"],
+    });
+    expect(body.games.map((game) => game.appId)).toEqual(["1", "2", "3"]);
+
+    expect(harness.discordPayloads).toHaveLength(1);
+    expect(harness.discordPayloads[0]?.embeds).toHaveLength(3);
+    expect(harness.searchRequests).toEqual([TEST_SEARCH_URL]);
+
+    // The test endpoint must not validate or write KV state.
+    expect(harness.validated).toEqual([]);
+    expect(harness.kv.store.size).toBe(0);
+  });
+
+  it("posts even when KV says the games were already notified", async () => {
+    const harness = createHarness({
+      games: [
+        { appId: "1", name: "One" },
+        { appId: "2", name: "Two" },
+        { appId: "3", name: "Three" },
+      ],
+      triggerToken: "secret",
+      kvRaw: JSON.stringify({
+        "1": {
+          firstSeenAt: NOW - DAY,
+          lastSeenAt: NOW - DAY,
+          free: true,
+          kind: "game",
+          notifiedAt: NOW - DAY,
+        },
+      }),
+    });
+    const stateBefore = harness.kv.store.get(SEEN_GAMES_KEY);
+
+    const response = await callWorker(harness, "/test", {
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      notified: ["1", "2", "3"],
+    });
+    expect(harness.discordPayloads[0]?.embeds).toHaveLength(3);
+    expect(harness.kv.store.get(SEEN_GAMES_KEY)).toBe(stateBefore);
+  });
+
+  it("applies the configured mentions", async () => {
+    const harness = createHarness({
+      games: [
+        { appId: "10", name: "Alpha" },
+        { appId: "20", name: "Beta" },
+        { appId: "30", name: "Gamma" },
+      ],
+      triggerToken: "secret",
+      mentionUsers: [
+        { discordId: DISCORD_ID_A, steamId: STEAM_ID_A },
+        { discordId: DISCORD_ID_B, steamId: STEAM_ID_B },
+      ],
+      steamApiKey: "test-key",
+      libraries: {
+        [STEAM_ID_A]: ["10"],
+        [STEAM_ID_B]: [],
+      },
+    });
+
+    await callWorker(harness, "/test", {
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(harness.discordPayloads[0]).toMatchObject({
+      content: `<@${DISCORD_ID_B}> <@${DISCORD_ID_A}>`,
+      allowed_mentions: {
+        parse: [],
+        users: [DISCORD_ID_B, DISCORD_ID_A],
+      },
+    });
+  });
+
+  it("requires the manual trigger token", async () => {
+    const harness = createHarness({
+      games: [{ appId: "1", name: "One" }],
+      triggerToken: "secret",
+    });
+
+    const response = await callWorker(harness, "/test");
+
+    expect(response.status).toBe(401);
+    expect(harness.discordPayloads).toHaveLength(0);
   });
 });
